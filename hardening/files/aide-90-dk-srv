@@ -1,0 +1,30 @@
+# Installed by dk-srv hardening/install-hardening.sh (part "aide") as /etc/aide/aide.conf.d/90_dk-srv.
+# Places that change all the time and are no "system files": left out of the file integrity check.
+# Each app adds its own (AIDE_EXCLUDE in /etc/dk-srv/apps.d/<app>.conf -> 91_dk-app-<app>, written
+# by dk-app-update).
+!@ADMIN_HOME@/\.npm
+!@ADMIN_HOME@/\.pm2
+!@ADMIN_HOME@/\.cache
+!@ADMIN_HOME@/\.local/share
+!@ADMIN_HOME@/dk-srv-facts-.*
+!@ADMIN_HOME@/storybook-facts-.*
+!/var/lib/postgresql
+!/var/cache/nginx
+!/var/lib/dk-srv
+!/var/lib/aide
+!/var/lib/usg
+!/var/log
+
+# Shell, editor and tool histories of root and the administrator: they change with every use (e.g.
+# /root/.viminfo after `sudo vim`). Everything else in the home folders stays in – root's and the
+# administrator's .ssh in particular.
+!/root/\.(bash_history|lesshst|viminfo|python_history|wget-hsts|psql_history|sqlite_history|selected_editor|sudo_as_admin_successful)
+!/root/\.local/share/nano
+!/root/\.cache
+!@ADMIN_HOME@/\.(bash_history|lesshst|viminfo|python_history|wget-hsts|psql_history|sqlite_history|node_repl_history|selected_editor|sudo_as_admin_successful)
+
+# The EFI partition is FAT: FAT has no inode numbers, Linux makes some up at every mount (= every
+# boot), so AIDE saw "changed" files in /boot/efi after each restart. Checked without the inode
+# number – contents, sizes and times still count. (aide-common's own rule for this,
+# 31_aide_grub-efi, only knows Debian's folder names.)
+/boot/efi(/.*)?$ Full-i

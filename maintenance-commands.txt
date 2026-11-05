@@ -1,0 +1,277 @@
+###################################################################################################
+# RUNNING THE SERVER – everyday commands, security, emergencies
+#
+# Where to run each command:
+#   (server)  on the server, logged in as appuser
+#   (laptop)  on your own computer
+#
+# Setting up a new server: setup-commands.txt. How each mechanism works: HARDENING.md.
+# The apps have their own commands (the storybook's: project_maintenance_commands.txt).
+###################################################################################################
+
+
+# =================================================================================================
+# Quick health check
+# =================================================================================================
+
+# (server) the server's mode, every app's mode, the check settings, the last security check
+sudo dk-mode status
+
+# (server) the weekly report now, on the screen (without --print: sent to the phone)
+sudo dk-weekly-report --print
+
+
+# =================================================================================================
+# Updating dk-srv (after a push to its repository)
+# =================================================================================================
+
+# (server) pull (root-owned clone), look at what's new, then install the commands again
+sudo git -C /opt/dk-srv pull
+sudo git -C /opt/dk-srv log --oneline -5
+sudo /opt/dk-srv/install.sh
+
+# (server) if the hardening files changed (git log names them): that part again, e.g.
+sudo /opt/dk-srv/hardening/install-hardening.sh --dry-run all
+sudo /opt/dk-srv/hardening/install-hardening.sh kernel
+# (server) if nginx/ changed
+sudo /opt/dk-srv/nginx/install-nginx.sh --diff
+sudo /opt/dk-srv/nginx/install-nginx.sh
+
+# (server) an app's root parts changed (its ops/root/ – the app's own deploy steps say when):
+# pulls, shows the new commits and what changed in ops/root/, asks, installs
+sudo dk-app-update storybook
+
+
+# =================================================================================================
+# Static sites (HARDENING.md, "Static sites")
+# =================================================================================================
+
+# (laptop) change the site in its repository (e.g. dk-home: site/index.html, a picture). Pictures:
+# remove the metadata BEFORE committing – the repository keeps every version forever
+exiftool -all= -tagsFromFile @ -Orientation -ICC_Profile -overwrite_original site/picture.jpg
+git add -A && git commit -m "…" && git push
+
+# (server) pull, check every file, install (--check: only check)
+sudo dk-site-update <name> --check
+sudo dk-site-update <name>
+
+# (server) a new site: setup-commands.txt, step 12. Which sites exist:
+ls /etc/dk-srv/sites.d/
+
+# (server) check: the picture comes as image/jpeg, with a CSP without scripts
+curl -sI https://<name>/picture.jpg | grep -iE '^HTTP|content-type|content-security'
+
+
+# =================================================================================================
+# Lockdown – the whole web server off (only SSH stays reachable)
+#   For: a severe security problem in nginx or OpenSSL themselves that has no fix yet.
+#   An app's own maintenance mode is the app's command (sudo storybook-mode maintenance).
+#   Every mode survives reboots; each step is checked, and your phone gets a notification.
+# =================================================================================================
+
+sudo dk-mode lockdown --reason "nginx CVE-2026-..."
+# back: refused while the reason is still there (it says what); --force switches anyway and
+# accepts the problems found as false alarms
+sudo dk-mode normal
+sudo dk-mode normal --force
+
+
+# ---------- Lockdown BY HAND, if dk-mode itself ever doesn't work ----------
+
+# (server) which mode is on? "masked" = lockdown, "enabled" = normal
+systemctl is-enabled nginx
+
+# switch ON:
+# (server) 1. stop every app's backend (each app's mode command, e.g.)
+sudo storybook-mode stop
+# (server) 2. stop nginx, and make sure nothing can start it again (no reboot, no update)
+sudo systemctl mask --now nginx
+# (server) 3. close ports 80/443 in the firewall as a second barrier (SSH stays open)
+sudo ufw delete allow 'Nginx Full'
+# (server) 4. pause the certificate renewal (it would try to start nginx)
+sudo systemctl stop certbot.timer
+# (server) 5. check: nothing listens on 80/443 any more, and the firewall only allows OpenSSH
+sudo ss -tlnp | grep -E ':(80|443) ' || echo "ports 80/443 closed"
+sudo ufw status
+
+# switch OFF (after the fixed version is installed):
+# (server) 1. the fix is installed: no nginx/OpenSSL update waiting, the problem no longer listed
+sudo apt update && apt list --upgradable 2>/dev/null | grep -iE 'nginx|openssl|libssl'
+pro cves | grep -iE 'nginx|openssl|libssl'
+# (server) 2. allow nginx again, check its config, start it; open 80/443; certificate renewal on
+sudo systemctl unmask nginx && sudo systemctl enable nginx
+sudo nginx -t && sudo systemctl start nginx
+sudo ufw allow 'Nginx Full'
+sudo systemctl start certbot.timer
+# (server) 3. start every app's backend again
+sudo storybook-mode start
+# (server) 4. check: the certificate is still valid ("VALID: ... days")
+sudo certbot certificates
+
+
+# =================================================================================================
+# The nightly security check, notifications
+# =================================================================================================
+
+# (server) run it now – shows each step and a summary at the end (the nightly run: --quiet)
+sudo dk-security-check
+
+# (server) its log (every run, also by hand)
+sudo tail -40 /var/log/dk-srv/security-check.log
+
+# (server) a "Would switch on …" / switched-on problem doesn't matter here (read it first:
+# pro cve CVE-...): accept the problems found now as false alarms
+sudo dk-security-check --accept
+
+# (server) what's accepted (delete a line to un-accept it)
+sudo cat /var/lib/dk-srv/accepted
+sudo nano /var/lib/dk-srv/accepted
+
+# (server) trial mode or automatic? MODE= in /etc/dk-srv/dk-srv.conf:
+#   MODE=trial  only notifies ("Would switch on …") – the start
+#   MODE=auto   switches an app's maintenance mode / the lockdown on by itself
+# Change it with nano (Ctrl+O, Enter, Ctrl+X); applies from the next run.
+sudo nano /etc/dk-srv/dk-srv.conf
+
+# (server) the ntfy topic: only in this file on the server (root:appuser, -rw-r-----), never in
+# git – check that nobody else can read it
+stat -c '%A %U:%G %n' /etc/dk-srv /etc/dk-srv/notify.conf
+
+# (server) send a test notification; messages that couldn't be sent
+dk-notify "Test" "Hello from the server"
+journalctl -t dk-notify --since today
+
+# (server) a new ntfy topic (e.g. if the old one got known): make one, subscribe to it in the
+# app, then put it after NTFY_TOPIC= (the scripts and the apps use it from the next message on)
+echo "dk-$(openssl rand -hex 16)"
+sudo nano /etc/dk-srv/notify.conf
+
+# (server) known problems in the installed Ubuntu packages, with Ubuntu's rating
+# (critical/high/medium/low); --unfixable = no fix available yet (Ubuntu Pro client 35+)
+pro cves
+pro cves --unfixable
+
+# (server) updates waiting (normally installed automatically every day)
+apt list --upgradable
+
+# (server) firewall and fail2ban
+sudo ufw status
+sudo fail2ban-client status
+sudo fail2ban-client status dk-scanners
+
+# (server) unban an IP address (e.g. your own): dk-scanners, nginx-limit-req or sshd
+sudo fail2ban-client set dk-scanners unbanip 1.2.3.4
+
+
+# =================================================================================================
+# The read token for private repositories (setup-commands.txt, step 9)
+# =================================================================================================
+
+# (server) days left: the weekly report shows them (GIT_TOKEN_EXPIRES in /etc/dk-srv/dk-srv.conf)
+grep GIT_TOKEN_EXPIRES /etc/dk-srv/dk-srv.conf
+
+# (laptop, browser) a new token, or change the old one's repositories: GitHub → Settings →
+# Developer settings → Fine-grained tokens. A new one: (server) store it, as in setup step 9:
+read -rsp 'GitHub token: ' T; echo; printf 'https://DimiJonas:%s@github.com\n' "$T" | sudo tee /etc/dk-srv/git-credentials > /dev/null; unset T
+sudo chmod 600 /etc/dk-srv/git-credentials
+sudo nano /etc/dk-srv/dk-srv.conf                     # GIT_TOKEN_EXPIRES=YYYY-MM-DD
+
+# (server) check that it works (lists the latest commit, changes nothing)
+sudo git -C /opt/dk-sites/<name> -c credential.helper= -c 'credential.helper=store --file=/etc/dk-srv/git-credentials' ls-remote origin HEAD
+
+# (server) no private repository left: remove the token (and delete it on GitHub)
+sudo rm /etc/dk-srv/git-credentials
+
+
+# =================================================================================================
+# Hardening (HARDENING.md; SECURITY.md)
+# =================================================================================================
+
+# (server) is the hardening still in place? (the nightly check notifies when something changed –
+# put a part back by running it again)
+sudo bash -c '. /usr/local/lib/dk-srv/security-lib.sh; hardening_drift' || true
+sudo /opt/dk-srv/hardening/install-hardening.sh --dry-run all
+sudo /opt/dk-srv/hardening/install-hardening.sh ssh            # e.g. put the SSH part back
+
+# (server) what the hardening changed, when, and the backups of the old files
+sudo tail -30 /var/log/dk-srv/hardening.log
+sudo ls /var/backups/dk-srv-hardening/
+
+# (server) update brought a new version of a config file we changed (weekly report: "New config
+# versions"): compare, take over what's useful, then delete the new version
+find /etc -name '*.dpkg-dist' 2>/dev/null
+sudo diff /etc/ufw/sysctl.conf /etc/ufw/sysctl.conf.dpkg-dist      # e.g.
+sudo rm /etc/ufw/sysctl.conf.dpkg-dist
+
+# (server) the audit system: what happened, by key (time-change, identity, scope, logins,
+# perm_mod, access, delete, sshd, ssh-keys, nginx, dk-srv-config, app-storybook, privileged, …)
+sudo ausearch -k ssh-keys -i --start today
+sudo aureport --summary
+
+# (server) every sudo command (also yours)
+sudo tail -20 /var/log/sudo.log
+
+# (server) sudo says your account is locked (4 wrong passwords): it unlocks itself after
+# 15 minutes; the SSH key login still works. To see the failures (from another session as root):
+sudo faillock --user appuser
+
+# (server) which SSH keys may log in (a backup key is one with command="…rrsync -ro…")
+awk '{ print $1 ~ /^(ssh|ecdsa)/ ? $1 " " $NF : "restricted: " $NF }' ~/.ssh/authorized_keys
+
+
+# =================================================================================================
+# File integrity (AIDE – HARDENING.md, "aide")
+# =================================================================================================
+
+# (server) the check now (a few minutes), and its log (unexplained changes are listed there, each
+# with what changed: content, rights, owner, inode, times …)
+sudo dk-aide-check
+sudo tail -30 /var/log/dk-srv/aide-check.log
+
+# (server) it runs every night at 05:40 from Ubuntu's timer: next run, and the last runs' errors
+systemctl list-timers dailyaidecheck.timer
+journalctl -u dailyaidecheck --since -2days --no-pager | tail -20
+
+# (server) after changing a system file on purpose by hand: tell the check, so it doesn't report
+# it (the path of the file or folder; several are fine)
+sudo dk-aide-check expect /etc/some/file
+
+# (server) which AIDE rule covers a path (f = file, d = folder) – e.g. why a file isn't checked
+sudo aide --config /etc/aide/aide.conf -p f:/root/.viminfo
+
+# (server) "File integrity: … /boot/efi/EFI/BOOT/BOOTX64.EFI": the EFI boot file is a copy of the
+# shim from the package shim-signed – the same checksum means it's Ubuntu's own
+sudo sha256sum /boot/efi/EFI/BOOT/BOOTX64.EFI /usr/lib/shim/shimx64.efi*
+
+
+# =================================================================================================
+# Measuring (SECURITY.md, "Result" – note both scores there)
+# =================================================================================================
+
+# (server) the CIS audit: all rules, and without the accepted risks (tailoring); the last lines
+# name the HTML report (copy it to the laptop to read it – never into a repository)
+sudo usg audit cis_level1_server
+sudo usg audit --tailoring-file /etc/dk-srv/usg-tailoring.xml
+
+# (server) the tailoring file anew – after a USG update, or when make-tailoring.py changed (new
+# accepted risks): USG's template, then our rules switched off (HARDENING.md, "Measuring")
+sudo usg generate-tailoring cis_level1_server /tmp/usg-tailoring.xml
+sudo python3 /opt/dk-srv/hardening/make-tailoring.py /tmp/usg-tailoring.xml /etc/dk-srv/usg-tailoring.xml
+
+# (server) the facts for a review (read-only, anonymised): ~/dk-srv-facts-<date>.txt
+sudo /opt/dk-srv/hardening/collect-facts.sh
+
+# (laptop) copy them over (SERVER = the server's address)
+scp appuser@SERVER:dk-srv-facts-*.txt .
+
+
+# =================================================================================================
+# HTTPS certificates
+# =================================================================================================
+
+# (server) which certificates exist and until when they are valid (renewed automatically
+# 30 days before they expire)
+sudo certbot certificates
+
+# (server) test the automatic renewal (changes nothing)
+sudo certbot renew --dry-run

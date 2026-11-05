@@ -1,0 +1,194 @@
+#!/bin/bash
+# Weekly report of the server, sent to your phone (cron: Monday 08:00, as root).
+# Covers the last 7 days:
+#   banned IPs per fail2ban jail, SSH logins, per app (/etc/dk-srv/apps.d/): failed and blocked
+#   logins, backups x/7, the last restore test, npm audit counts, mode;
+#   updates waiting, restart needed, disk space, certificate, known problems without a fix,
+#   npm audit counts, mode (normal/maintenance/lockdown), last security check; since step 15:
+#   whether the hardening is still in place, the file integrity checks (AIDE) of the week, the last
+#   restore test and whether the backups are encrypted, and config files for which an update brought
+#   a new version (kept ours: *.dpkg-dist next to it, see /etc/apt/apt.conf.d/60-dk-srv-keep-config).
+# Bans of bots and scanners only appear here – they happen every day on every public server.
+# Also: days left on the read token for private repositories (GIT_TOKEN_EXPIRES in dk-srv.conf).
+# Run by hand: sudo dk-weekly-report   (--print: show it, don't send)
+set -u
+# shellcheck source=security-lib.sh
+. "${DK_LIB:-/usr/local/lib/dk-srv}/security-lib.sh"
+: "${FAIL2BAN_LOG:=/var/log/fail2ban.log}"
+: "${NGINX_ACCESS_LOG:=/var/log/nginx/access.log}"
+: "${CERT_DIR:=/etc/letsencrypt/live}"
+: "${REBOOT_FILE:=/var/run/reboot-required}"
+: "${LOG_FILE:=$DK_LOG_DIR/weekly-report.log}"
+: "${ETC_DIR:=/etc}"
+
+need_root
+log() { mkdir -p "$(dirname "$LOG_FILE")"; printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG_FILE"; }
+print_only=no
+[ "${1:-}" = --print ] && print_only=yes
+
+# all lines of a log and its rotated copies (log.1, log.2.gz, …)
+read_logs() {
+  local f
+  for f in "$1" "$1".1 "$1".*.gz; do
+    [ -e "$f" ] || continue
+    case "$f" in *.gz) zcat -- "$f" ;; *) cat -- "$f" ;; esac
+  done 2>/dev/null
+}
+
+since_iso=$(date -d '7 days ago' '+%F %T')
+
+# --- fail2ban: "2026-10-20 12:00:00,123 fail2ban.actions [1]: NOTICE  [sshd] Ban 1.2.3.4" -----
+# (a ban is counted each time; the same bot banned again after its ban ran out counts again)
+bans=$(read_logs "$FAIL2BAN_LOG" | awk -v since="$since_iso" '
+  substr($0, 1, 19) >= since && / Ban / && !/Restore Ban/ {
+    if (match($0, /\[[^]]+\] Ban/)) {
+      jail = substr($0, RSTART + 1, RLENGTH - 6); n[jail]++; total++
+      ip = $NF; if (!(ip in seen)) { seen[ip] = 1; ips++ }
+    }
+  }
+  END {
+    out = ""
+    for (j in n) out = out (out ? ", " : "") j " " n[j]
+    printf "%d bans of %d different IPs%s", total, ips, (out ? " (" out ")" : "")
+  }')
+
+days_pattern=$(for i in 0 1 2 3 4 5 6; do LC_ALL=C date -d "$i days ago" '+%d/%b/%Y'; done | paste -sd'|')
+access_week=$(read_logs "$NGINX_ACCESS_LOG" | grep -E "\[($days_pattern):" || true)
+
+# --- SSH logins (system journal) ---------------------------------------------------------------
+ssh_logins=$(journalctl -q --since '7 days ago' -t sshd -t sshd-session 2>/dev/null | grep -c 'Accepted publickey' || true)
+
+# --- per app ------------------------------------------------------------------------------------
+# certificate days left as the site really sends it (during lockdown: certbot's file)
+cert_days() {
+  local domain=$1 end f
+  end=$(echo | timeout 15 openssl s_client -connect "$domain:443" -servername "$domain" 2>/dev/null \
+          | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+  if [ -z "$end" ]; then
+    for f in "$CERT_DIR/$domain/cert.pem" "$CERT_DIR"/*/cert.pem; do
+      [ -r "$f" ] && end=$(openssl x509 -enddate -noout -in "$f" 2>/dev/null | cut -d= -f2) && [ -n "$end" ] && break
+    done
+  fi
+  if [ -n "$end" ]; then echo "$(( ($(date -d "$end" +%s) - $(date +%s)) / 86400 )) days"; else echo "?"; fi
+}
+app_lines="" attention=no
+for app in $(apps); do
+  line="$app: $(app_mode "$app")"
+  [ "$(app_mode "$app")" = normal ] || attention=yes
+  # logins in nginx's log: POST <LOGIN_PATH> answered 401 (wrong) or 429 (waiting)
+  lp=$(app_get "$app" LOGIN_PATH)
+  if [ -n "$lp" ]; then
+    login_lines=$(printf '%s\n' "$access_week" | grep -F "\"POST $lp ")
+    line+="; logins $(printf '%s\n' "$login_lines" | grep -cE '" 401 ' || true) wrong, $(printf '%s\n' "$login_lines" | grep -cE '" 429 ' || true) blocked"
+  fi
+  # backups: "2026-10-20 03:15:42 backup done" (also in the rotated copy)
+  bl=$(app_get "$app" BACKUP_LOG)
+  if [ -n "$bl" ]; then
+    ok=0 missing=""
+    done_lines=$(read_logs "$bl" | grep -F 'backup done' || true)
+    for i in 6 5 4 3 2 1 0; do
+      day=$(date -d "$i days ago" +%F)
+      if printf '%s\n' "$done_lines" | grep -q "^$day "; then ok=$((ok + 1)); else missing+="$(LC_ALL=C date -d "$day" '+%a %d.%m.'), "; fi
+    done
+    line+="; backups $ok/7"
+    printf '%s\n' "$done_lines" | tail -1 | grep -q '(encrypted)' && line+=" (encrypted)" || line+=" (NOT encrypted)"
+    [ -n "$missing" ] && line+=" – missing: ${missing%, } (tail -30 $bl)"
+    [ "$ok" -lt 7 ] && attention=yes
+  fi
+  rl=$(app_get "$app" RESTORE_TEST_LOG)
+  if [ -n "$rl" ]; then
+    rt=$(tail -1 "$rl" 2>/dev/null || true); line+="; last restore test: ${rt:-none yet}"
+    [[ $rt == *FAILED* ]] && attention=yes
+  fi
+  npm=""
+  for dir in $(app_get "$app" NPM_DIRS); do
+    [ -r "$DK_STATE/npm-$app-$dir" ] && { read -r c h m l < "$DK_STATE/npm-$app-$dir"; npm+="$dir $c/$h/$m/$l, "; }
+  done
+  [ -n "$npm" ] && line+="; npm (critical/high/moderate/low) ${npm%, }"
+  url=$(app_get "$app" SITE_URL)
+  [ -n "$url" ] && line+="; certificate $(cert_days "$(printf '%s' "$url" | sed -E 's#^https?://##; s#/.*##')")"
+  app_lines+="
+- $line"
+done
+for site in $(sites); do app_lines+="
+- site $site: answers $(http_code "https://$site"), certificate $(cert_days "$site")"; done
+[ -n "$app_lines" ] || app_lines="
+- no apps registered (/etc/dk-srv/apps.d/)"
+
+token_line=""
+if [ -n "$GIT_TOKEN_EXPIRES" ]; then
+  left=$(( ($(date -d "$GIT_TOKEN_EXPIRES" +%s 2>/dev/null || date +%s) - $(date +%s)) / 86400 ))
+  token_line="
+- Read token for private repositories: $left days left (expires $GIT_TOKEN_EXPIRES)"
+  [ "$left" -le 30 ] && { token_line+=" – RENEW IT on GitHub, then update /etc/dk-srv/git-credentials and GIT_TOKEN_EXPIRES"; attention=yes; }
+fi
+
+# --- updates, restart, disk, certificate ------------------------------------------------------
+updates=$(apt list --upgradable 2>/dev/null | grep -c upgradable || true)
+if [ -e "$REBOOT_FILE" ]; then reboot="yes"; else reboot="no"; fi
+disk=$(df -P / | awk 'NR == 2 { print $5 }')
+
+# --- known problems without a fix (from the last nightly check) ------------------------------
+# (each problem once – `pro cves` lists it once per package it affects)
+unfixable="not checked yet"
+if [ -s "$DK_STATE/cve-summary" ]; then
+  get() { sed -n "s/^$1=//p" "$DK_STATE/cve-summary"; }
+  unfixable="$(get UNIQUE) ($(get BY_PRIORITY))"
+  top=$(get SEVERE_TOP); [ -n "$top" ] && unfixable+="; most high/critical in: $top"
+  kernels=$(get KERNEL_VERSIONS | tr ',' '\n' | grep -c . || true)
+  [ "$kernels" -gt 1 ] && unfixable+="; $kernels kernel versions installed (sudo apt autoremove --purge removes old ones)"
+fi
+
+# --- hardening, file integrity -------------------------------------------------------------------
+hardening="not installed"
+if [ -s "$DK_STATE/hardening-parts" ]; then
+  drift=$(hardening_drift)
+  if [ -z "$drift" ]; then hardening="all in place ($(paste -sd' ' "$DK_STATE/hardening-parts"))"
+  else hardening="CHANGED: $(printf '%s' "$drift" | paste -sd ';' | sed 's/;/; /g')"; fi
+fi
+aide_line="not set up"
+if [ -s "$DK_STATE/aide-history" ]; then
+  aide_line=$(awk -v since="$(date -d '7 days ago' '+%F')" '$1 >= since {
+      n++; for (i = 3; i <= NF; i++) { split($i, kv, "="); sum[kv[1]] += kv[2] } }
+    END { if (!n) { print "no check this week"; exit }
+          printf "%d checks, %d changes (%d explained), unexplained: %d sensitive, %d elsewhere", n, sum["changes"], sum["explained"], sum["sensitive"], sum["other"] }' "$DK_STATE/aide-history")
+fi
+# an update brought a new version of a config file we changed: ours stays, the new one is next to
+# it (dpkg: .dpkg-dist, ucf: .ucf-dist). Compare (diff FILE FILE.dpkg-dist), take over what's
+# useful, then delete the .dpkg-dist file.
+conf_new=$(find "$ETC_DIR" -xdev \( -name '*.dpkg-dist' -o -name '*.ucf-dist' -o -name '*.dpkg-new' \) 2>/dev/null | sort)
+conf_line="none"
+if [ -n "$conf_new" ]; then
+  conf_line="$(printf '%s\n' "$conf_new" | wc -l): $(printf '%s\n' "$conf_new" | head -6 | paste -sd' ')"
+  [ "$(printf '%s\n' "$conf_new" | wc -l)" -gt 6 ] && conf_line+=" …"
+  conf_line+=" (compare: sudo diff FILE FILE.dpkg-dist)"
+fi
+mode=$(server_mode)
+accepted=""
+[ -s "$DK_STATE/accepted" ] && accepted="Accepted as false alarms: $(paste -sd';' "$DK_STATE/accepted")"
+
+report="This week:
+- fail2ban: $bans
+- SSH logins: $ssh_logins
+- Updates waiting: $updates, restart needed: $reboot
+- Disk: $disk used
+- Known problems without a fix: $unfixable
+- Hardening: $hardening
+- File integrity: $aide_line
+- New config versions from updates: $conf_line
+- Server: $mode; security check: MODE=$MODE, last run $(cut -d' ' -f1-2 "$DK_STATE/last-check" 2>/dev/null || echo never)${token_line}
+Apps and sites:${app_lines}"
+[ -n "$accepted" ] && report+="
+- $accepted"
+
+priority=low
+{ [ "$attention" = yes ] || [ "$mode" != normal ] || [ "$reboot" = yes ] || [[ $hardening == CHANGED* ]]; } && priority=default
+
+if [ "$print_only" = yes ]; then
+  echo "$report"
+else
+  log "weekly report: $(echo "$report" | tr '\n' ' ')"
+  notify "Weekly report" "$report" "$priority" bar_chart
+  echo "$report"
+  echo "(sent to your phone)"
+fi

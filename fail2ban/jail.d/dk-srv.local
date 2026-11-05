@@ -1,0 +1,29 @@
+# fail2ban jails of the server. Copied to /etc/fail2ban/jail.d/ by install.sh.
+#
+# Unban an address (e.g. yourself):   sudo fail2ban-client set dk-scanners unbanip 1.2.3.4
+# See who is banned:                  sudo fail2ban-client status dk-scanners
+
+# Scanners looking for PHP/WordPress/.env/.git: banned for a day after 2 such requests
+[dk-scanners]
+enabled  = true
+backend  = auto
+port     = http,https
+filter   = dk-scanners
+logpath  = /var/log/nginx/access.log
+maxretry = 2
+findtime = 10m
+bantime  = 1d
+
+# IPs that keep running into a rate limit (nginx' limit_req, e.g. an app's login): banned for an hour.
+# Uses the filter that comes with fail2ban. Besides banning (fail2ban's normal
+# action), every ban sends a notification to your phone (action.d/dk-notify.conf).
+[nginx-limit-req]
+enabled  = true
+backend  = auto
+port     = http,https
+logpath  = /var/log/nginx/error.log
+maxretry = 10
+findtime = 10m
+bantime  = 1h
+action   = %(action_)s
+           dk-notify

@@ -1,0 +1,13 @@
+// Installed by dk-srv hardening/install-hardening.sh (part "packages") as
+// /etc/apt/apt.conf.d/60-dk-srv-keep-config.
+//
+// The hardening changed configuration files that belong to packages ("conffiles", e.g.
+// /etc/ufw/sysctl.conf, /etc/sysctl.d/10-network-security.conf, /etc/security/pwquality.conf,
+// /etc/nginx/nginx.conf, /etc/issue). When an update brings a new version of such a file, dpkg
+// stops and asks which one to keep – and the automatic updates (unattended-upgrades) skip the
+// whole package instead, security fixes included.
+// With these two options dpkg never asks: files we changed stay as they are, the package's new
+// version is saved next to them as <file>.dpkg-dist (the weekly report lists those – compare them
+// with `diff`); files nobody changed are updated normally. Also for `sudo apt upgrade` by hand.
+DPkg::Options:: "--force-confdef";
+DPkg::Options:: "--force-confold";

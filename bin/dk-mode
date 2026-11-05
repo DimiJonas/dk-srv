@@ -1,0 +1,153 @@
+#!/bin/bash
+# The server's emergency mode – lockdown – and the status of everything (with sudo):
+#
+#   sudo dk-mode status          the server's mode, each app's mode, the check settings
+#   sudo dk-mode lockdown        nginx switched off and masked, ports 80/443 closed, certificate
+#                                renewal paused, every app stopped – only SSH stays reachable.
+#                                For a severe hole in nginx/OpenSSL themselves
+#   sudo dk-mode normal          back: refused while the reason is still there (nginx/OpenSSL update
+#                                waiting, severe hole without a fix, critical npm problems in an
+#                                app); --force switches anyway and accepts those problems as false
+#                                alarms (the nightly check won't switch on again for them)
+#
+#   --reason "…"   (lockdown) shown in the notification and in `status`
+#
+# An app's own maintenance mode (its page "kurze Pause", its backend stopped) is the app's command,
+# named in /etc/dk-srv/apps.d/<app>.conf (MODE_CMD, e.g. sudo storybook-mode maintenance). Lockdown
+# stops every app through it (MODE_CMD stop) and starts them again on the way back (MODE_CMD start).
+# Every mode survives reboots. The nightly security check switches by itself once MODE=auto is set
+# in /etc/dk-srv/dk-srv.conf. Installed by install.sh to /usr/local/sbin/dk-mode (owned by root).
+set -u
+. "${DK_LIB:-/usr/local/lib/dk-srv}/security-lib.sh"
+
+command=${1:-}
+shift || true
+reason="started by hand"
+force=no
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --reason) reason=${2:-$reason}; shift 2 ;;
+    --force) force=yes; shift ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+problems=0
+step() { echo; echo "== $*"; }
+ok() { echo "   ok: $*"; }
+warn() { echo "   WARNING: $*"; problems=$((problems + 1)); }
+certbot_timers() { systemctl list-unit-files --no-legend certbot.timer snap.certbot.renew.timer 2>/dev/null | awk '{ print $1 }'; }
+
+# for each app: its mode command with an argument
+each_app() {
+  local app cmd
+  for app in $(apps); do
+    if cmd=$(app_mode_cmd "$app"); then
+      if "$cmd" "$@" --reason "$reason" > /dev/null 2>&1; then ok "$app: $1"; else warn "$app: '$cmd $1' didn't work – sudo $cmd status"; fi
+    else
+      warn "$app: no usable MODE_CMD in $APPS_DIR/$app.conf"
+    fi
+  done
+}
+
+# Is the reason for lockdown still there? Prints what's wrong; returns 1 if anything is.
+still_a_problem() {
+  local found=0 line app dir result
+  echo "Checking whether the problem is fixed …"
+  if line=$(facing_upgradable) && [ -n "$line" ]; then
+    echo " - nginx/OpenSSL updates are waiting: $(echo "$line" | tr '\n' ' ')– install them: sudo apt update && sudo apt upgrade"
+    found=1
+  fi
+  if ! line=$(facing_unfixable); then
+    echo " - Ubuntu's list of known problems couldn't be read (pro cves)"; found=1
+  elif [ -n "$line" ]; then
+    echo " - severe problems without a fix in nginx/OpenSSL: $(echo "$line" | awk '{ print $1 " " $3 }' | tr '\n' ' ')"; found=1
+  fi
+  for app in $(apps); do
+    for dir in $(app_get "$app" NPM_DIRS); do
+      if ! result=$(npm_audit "$app" "$dir"); then
+        echo " - npm audit in $app/$dir didn't answer (no connection to the npm registry?)"; found=1
+      elif [ "$(echo "$result" | cut -d' ' -f1)" -gt 0 ]; then
+        echo " - critical problems in $app's $dir libraries: $(echo "$result" | cut -d' ' -f5) – update them and deploy"; found=1
+      fi
+    done
+  done
+  [ "$found" = 0 ] && echo " - nothing found"
+  return "$found"
+}
+
+case "$command" in
+  status)
+    need_root
+    mode=$(server_mode); line=$mode
+    if [ "$mode" != normal ] && [ -r "$DK_STATE/mode" ]; then
+      IFS=$'\t' read -r _ since why < "$DK_STATE/mode"; line+=" since $since – $why"
+    fi
+    accepted_count=$(grep -c . "$DK_STATE/accepted" 2>/dev/null || true)
+    printf '%-16s %s\n' "Server:" "$line" \
+      "nginx:" "$(systemctl is-enabled nginx 2>/dev/null), $(systemctl is-active nginx 2>/dev/null)"
+    for app in $(apps); do
+      url=$(app_get "$app" SITE_URL)
+      printf '%-16s %s\n' "App $app:" "$(app_mode "$app")${url:+ – $url answers $(http_code "$url")}"
+    done
+    for site in $(sites); do printf '%-16s %s\n' "Site $site:" "https://$site answers $(http_code "https://$site")"; done
+    printf '%-16s %s\n' "Security check:" "MODE=$MODE ($([ "$MODE" = auto ] && echo 'switches maintenance/lockdown on by itself' || echo 'trial – only notifies'))" \
+      "  last run:" "$(head -1 "$DK_STATE/last-check" 2>/dev/null || true)" \
+      "False alarms:" "${accepted_count:-0} accepted$([ "${accepted_count:-0}" -gt 0 ] && echo " (sudo cat $DK_STATE/accepted)")"
+    exit 0
+    ;;
+
+  lockdown)
+    need_root
+    if [ "$(server_mode)" = lockdown ]; then echo "Lockdown is already on."; exit 0; fi
+    echo "Switching to lockdown ($reason)"
+    step "stopping the apps"
+    each_app stop
+    step "stopping nginx so that nothing can start it again"
+    if systemctl mask --now nginx >/dev/null 2>&1; then ok "nginx stopped and masked"; else warn "couldn't stop nginx"; fi
+    step "closing ports 80/443 in the firewall"
+    if ufw status 2>/dev/null | grep -q 'Nginx Full'; then
+      if ufw delete allow 'Nginx Full' >/dev/null; then ok "closed"; else warn "ufw couldn't close them"; fi
+    else ok "already closed"; fi
+    step "pausing the certificate renewal (it would try to start nginx)"
+    for timer in $(certbot_timers); do systemctl stop "$timer" && ok "$timer stopped"; done
+    step "checking"
+    if ss -tln 2>/dev/null | grep -qE ':(80|443)\s'; then warn "something still listens on port 80/443"; else ok "nothing listens on 80/443"; fi
+    mkdir -p "$DK_STATE"; printf '%s\t%s\t%s\n' lockdown "$(date '+%F %T')" "$reason" > "$DK_STATE/mode"
+    notify "LOCKDOWN ON" "The web server is switched off, only SSH is reachable. Reason: $reason. Once the fixed version is installed: sudo dk-mode normal" urgent rotating_light
+    ;;
+
+  normal)
+    need_root
+    if [ "$(server_mode)" = normal ]; then echo "The server isn't in lockdown (an app's maintenance mode: its own command, see sudo dk-mode status)."; exit 0; fi
+    if [ "$force" = no ] && ! still_a_problem; then
+      echo; echo "Staying in lockdown. Fix the above first, or switch anyway with: sudo dk-mode normal --force"; exit 1
+    fi
+    [ "$force" = yes ] && accept_current
+    echo "Switching from lockdown back to normal"
+    step "nginx"
+    if ! { systemctl unmask nginx >/dev/null 2>&1 && systemctl enable nginx >/dev/null 2>&1; }; then warn "couldn't unmask nginx"; fi
+    if nginx -t >/dev/null 2>&1 && systemctl start nginx; then ok "nginx started"; else warn "nginx didn't start – sudo nginx -t shows why"; fi
+    step "opening ports 80/443 again"
+    if ufw allow 'Nginx Full' >/dev/null; then ok "opened"; else warn "ufw couldn't open them"; fi
+    step "switching the certificate renewal back on"
+    for timer in $(certbot_timers); do systemctl start "$timer" && ok "$timer started"; done
+    step "starting the apps (an app that was in maintenance mode before stays there)"
+    each_app start
+    step "checking"
+    for app in $(apps); do
+      url=$(app_get "$app" SITE_URL); [ -n "$url" ] || continue
+      code=$(http_code "$url"); if [ "$code" = 200 ]; then ok "$app: $url answers 200"; else warn "$app: $url answers $code"; fi
+    done
+    rm -f "$DK_STATE/mode"
+    if [ "$problems" = 0 ]; then notify "Back to normal" "The web server and the apps are reachable again (was: lockdown)." default white_check_mark
+    else notify "Back to normal: $problems problem(s)" "Leaving lockdown: some steps didn't work – log in and run: sudo dk-mode status" high warning; fi
+    ;;
+
+  *)
+    awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
+    exit 2
+    ;;
+esac
+
+echo
+if [ "$problems" = 0 ]; then echo "Done."; else echo "Done, with $problems warning(s) – see above."; exit 1; fi

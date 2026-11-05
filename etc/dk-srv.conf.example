@@ -1,0 +1,16 @@
+# Settings of dk-srv (/etc/dk-srv/dk-srv.conf, created by install.sh). Read, never run: only
+# KEY=value lines count.
+
+# MODE=trial  the nightly security check only notifies ("would switch on …") – the start
+# MODE=auto   it switches an app's maintenance mode / the server's lockdown on by itself
+MODE=trial
+
+# The administrator's account: the only one that may log in by SSH (AllowUsers), with sudo
+ADMIN_USER=appuser
+
+# The group that may read /etc/dk-srv/notify.conf besides root (the apps send notifications too)
+NOTIFY_GROUP=appuser
+
+# When the read token for private repositories (/etc/dk-srv/git-credentials) expires – the weekly
+# report warns 30 days before. Empty: no token.
+GIT_TOKEN_EXPIRES=

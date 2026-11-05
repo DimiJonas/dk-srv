@@ -1,0 +1,20 @@
+# The server's scheduled security jobs (as root). Installed by install.sh to /etc/cron.d/dk-srv.
+# Times are the server's time zone (timedatectl; should be Europe/Berlin).
+# (The apps' own jobs, e.g. the storybook's nightly backup at 03:15, are the apps' business.)
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# nightly security check: after the apps' backups and the automatic restart (04:30). --quiet:
+# nothing on the screen – the script writes its steps to the log itself (also when run by hand);
+# only unexpected error messages end up there through ">>"
+10 5 * * * root /usr/local/sbin/dk-security-check --quiet >> /var/log/dk-srv/security-check.log 2>&1
+
+# (the file integrity check, 05:40, isn't here: Ubuntu's systemd timer dailyaidecheck.timer runs
+# it – the CIS audit wants a timer. hardening/install-hardening.sh, part "aide")
+
+# weekly report: Monday 08:00 (it logs itself; the screen output isn't needed here)
+0 8 * * 1 root /usr/local/sbin/dk-weekly-report > /dev/null 2>> /var/log/dk-srv/weekly-report.log
+
+# log rotation (dk-srv.logrotate -> /etc/dk-srv/logrotate.conf, with the apps' files from
+# /etc/dk-srv/logrotate.d/): every hour, so a log that suddenly grows is cut off within the hour
+17 * * * * root /usr/sbin/logrotate --state /var/lib/dk-srv/logrotate.status /etc/dk-srv/logrotate.conf >> /var/log/dk-srv/logrotate.log 2>&1

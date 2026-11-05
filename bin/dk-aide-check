@@ -1,0 +1,180 @@
+#!/bin/bash
+# File integrity check of the server – every night at 05:40 (Ubuntu's dailyaidecheck.timer, as
+# root – see hardening/files/aide-dailyaidecheck.*), or by hand:
+#
+#   sudo dk-aide-check                  check now (shows the summary)
+#   sudo dk-aide-check expect PATH …    you changed these files/folders on purpose: the next
+#                                              check counts their changes as explained
+#
+# AIDE (installed by hardening/install-hardening.sh, part "aide") keeps checksums of the system's
+# files. Every night this compares the server with them, accepts the current state as the new one
+# and sorts every change:
+#   explained   the file belongs to a package that was installed/updated since the last check
+#               (/var/log/dpkg.log; for files of packages removed since then, the list of every
+#               package's files from the last check is kept) – or is one that updates regenerate
+#               (ld.so.cache, a kernel's initrd, grub.cfg, the EFI boot files, …) and packages were
+#               updated – or one of the install scripts (or you, with `expect`) changed it
+#               on purpose (noted in /var/lib/dk-srv/aide-expected)
+#   sensitive   unexplained, and in a place an intruder would change: users and passwords, sudo,
+#               SSH (also authorized_keys), PAM, cron, systemd units, nginx, /etc/dk-srv and the
+#               root-owned clones in /opt, programs in /usr/local or /usr/bin, websites in /var/www,
+#               and each app's own (AIDE_SENSITIVE in /etc/dk-srv/apps.d/) -> urgent notification
+#   other       unexplained elsewhere -> only in the log and the weekly report
+# Log: /var/log/dk-srv/aide-check.log – each change with what changed (content, rights, owner,
+# inode, times …): "only the inode/times" is usually harmless, "content" is the one to look at. Limits: someone who is already root could also change the
+# database – the check finds changes made by others, not by a root intruder who knows about it.
+set -u
+# shellcheck source=security-lib.sh
+. "${DK_LIB:-/usr/local/lib/dk-srv}/security-lib.sh"
+: "${AIDE_CONF:=/etc/aide/aide.conf}"
+: "${AIDE_DB:=/var/lib/aide/aide.db}"
+: "${AIDE_DB_NEW:=/var/lib/aide/aide.db.new}"
+: "${DPKG_LOG:=/var/log/dpkg.log}"
+: "${LOG_FILE:=$DK_LOG_DIR/aide-check.log}"
+: "${DPKG_INFO:=/var/lib/dpkg/info}"
+: "${GENERATED_RE:=^(/etc/(ld\.so\.cache|alternatives/|ssl/certs/|apparmor\.d/cache|mailcap|fonts/)|/boot/(initrd\.img|grub/grub\.cfg|grub/grubenv|grub/x86_64-efi/|grub/i386-pc/|efi/)|/usr/share/(mime|icons|glib-2\.0/schemas)/|/usr/lib/[^/]+/(gdk-pixbuf|gio/modules)|/var/lib/)}"
+: "${SENSITIVE_RE:=^(/etc/(passwd|shadow|group|gshadow|sudoers|sudoers\.d/|ssh/|pam\.d/|security/|crontab|cron\.|systemd/system/|nginx/|dk-srv/|apt/sources|apt/trusted|ld\.so|profile|bash\.bashrc|environment|hosts$|audit/|apparmor)|/root/|/home/[^/]+/\.ssh/|/usr/local/|/usr/s?bin/|/usr/lib/systemd/|/boot/|/var/www/|/opt/dk-)}"
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 2; }
+case "${1:-}" in
+  "") ;;
+  expect)
+    shift; [ $# -gt 0 ] || usage
+    need_root; mkdir -p "$DK_STATE"
+    for p in "$@"; do
+      [[ $p == /* && $p != *$'\n'* ]] || { echo "Not an absolute path: $p" >&2; exit 2; }
+      p=${p%/}; printf '%s\n' "${p:-/}" >> "$DK_STATE/aide-expected"
+      echo "noted: ${p:-/} – the next check counts its changes as explained"
+    done
+    exit 0 ;;
+  *) usage ;;
+esac
+
+need_root
+mkdir -p "$DK_STATE" "$(dirname "$LOG_FILE")"
+# each app's sensitive places (AIDE_SENSITIVE in its apps.d file) join the list
+for app in $(apps); do
+  for p in $(app_get "$app" AIDE_SENSITIVE); do
+    [[ $p =~ ^/[A-Za-z0-9._/@-]+$ ]] && SENSITIVE_RE+="|^$(printf '%s' "$p" | sed 's/[.]/\\./g')"
+  done
+done
+exec 9> "$DK_STATE/aide.lock"
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG_FILE"; }
+# (ops/hardening/install-hardening.sh holds this lock while it builds the database)
+flock -n 9 || { log "skipped: another file integrity check or a database build (aideinit) is running"; exit 0; }
+# AIDE itself running outside our lock (e.g. `sudo aideinit` by hand): it would hold the database
+if pgrep -x aide > /dev/null; then
+  log "skipped: AIDE is already running (aideinit?) – the next run checks"
+  exit 0
+fi
+
+if [ ! -s "$AIDE_DB" ]; then
+  log "no AIDE database yet – sudo /opt/dk-srv/hardening/install-hardening.sh aide"
+  exit 0
+fi
+since=$(date -d "@$(stat -c %Y "$AIDE_DB")" '+%F %T')
+work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+# take the list of expected changes now (what install scripts add while the check runs counts next time)
+[ -s "$DK_STATE/aide-expected" ] && mv "$DK_STATE/aide-expected" "$work/expected" || : > "$work/expected"
+
+log "checking (changes since $since) …"
+# (the JSON report goes to its own file – whatever report_url the configuration already has)
+nice -n 10 aide --config "$AIDE_CONF" --update -B 'report_format=json' -B "report_url=file:$work/report.json" > /dev/null 2> "$work/aide.err"
+rc=$?
+# 0 = no changes, 1–7 = added/removed/changed files (bits), 14 and more = AIDE couldn't do its job
+if [ "$rc" -ge 14 ]; then
+  cat "$work/expected" >> "$DK_STATE/aide-expected"   # nothing was looked at – keep them
+  log "AIDE failed (exit code $rc): $(head -3 "$work/aide.err" | tr '\n' ' ')"
+  notify "File integrity check failed" "AIDE stopped with exit code $rc. See: sudo tail $LOG_FILE" high warning
+  exit 1
+fi
+[ -s "$AIDE_DB_NEW" ] && mv -f "$AIDE_DB_NEW" "$AIDE_DB" && chmod 600 "$AIDE_DB"
+
+# packages installed or updated since the last check
+awk -v since="$since" '($1 " " $2) >= since && ($3 == "install" || $3 == "upgrade" || $3 == "configure" || $3 == "remove" || $3 == "purge") { sub(/:.*/, "", $4); print $4 }' \
+  "$DPKG_LOG" 2>/dev/null | sort -u > "$work/packages"
+
+# every package's files as they were at the last check ("path<TAB>package") – for files of
+# packages removed since then (e.g. an old kernel's /boot/vmlinuz-… after `apt autoremove`), which
+# dpkg doesn't know any more
+snapshot="$DK_STATE/aide-dpkg-files.gz"
+python3 -I - "$work/report.json" "$work/expected" "$work/packages" "$SENSITIVE_RE" "$GENERATED_RE" "$snapshot" > "$work/result" <<'EOF'
+import gzip, json, re, subprocess, sys
+report_file, expected_file, packages_file, sensitive_re, generated_re, snapshot_file = sys.argv[1:7]
+try:
+    report = json.load(open(report_file))
+except Exception:
+    report = {}
+entries = [(kind, path) for kind in ('added', 'removed', 'changed') for path in (report.get(kind) or {})]
+expected = [l.strip().rstrip('/') for l in open(expected_file) if l.strip()]
+packages = {l.strip() for l in open(packages_file) if l.strip()}
+# which package each file belongs to (one dpkg call for all)
+owner = {}
+paths = sorted({p for _, p in entries})
+for i in range(0, len(paths), 500):
+    out = subprocess.run(['dpkg', '-S', *paths[i:i + 500]], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        if ': ' in line:
+            pkgs, path = line.split(': ', 1)
+            owner.setdefault(path, set()).update(p.split(':')[0].strip() for p in pkgs.split(','))
+# not known to dpkg any more: the list from the last check
+missing = {p for p in paths if p not in owner}
+if missing:
+    try:
+        with gzip.open(snapshot_file, 'rt', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                path, _, pkg = line.rstrip('\n').partition('\t')
+                if path in missing:
+                    owner.setdefault(path, set()).add(pkg)
+    except OSError:
+        pass
+# what changed, in words (AIDE's "details": sha256 -> content, perm -> rights, …)
+WORDS = {'size': 'size', 'perm': 'rights', 'uid': 'owner', 'user': 'owner', 'gid': 'group', 'group': 'group',
+         'inode': 'inode', 'linkcount': 'links', 'linkname': 'link target', 'modify_time': 'mtime',
+         'change_time': 'ctime', 'access_time': 'atime', 'acl': 'ACL', 'xattrs': 'xattrs', 'ftype': 'type'}
+details = report.get('details') or {}
+def what(path):
+    words = []
+    for attr in (details.get(path) or {}):
+        w = WORDS.get(attr, 'content' if attr in ('md5', 'sha1', 'sha256', 'sha512', 'rmd160', 'tiger', 'haval',
+                                                   'gost', 'crc32', 'crc32b', 'whirlpool', 'stribog256', 'stribog512') else attr)
+        if w not in words:
+            words.append(w)
+    return f" ({', '.join(words)})" if words else ''
+sens = re.compile(sensitive_re)
+generated = re.compile(generated_re)
+explained, sensitive, other = [], [], []
+for kind, path in entries:
+    by_us = any(path == e or path.startswith(e + '/') for e in expected)
+    by_update = bool(owner.get(path, set()) & packages) or (bool(packages) and path not in owner and bool(generated.search(path)))
+    if by_us or by_update:
+        explained.append(path)
+    elif sens.search(path):
+        sensitive.append(f'{kind} {path}' + (what(path) if kind == 'changed' else ''))
+    else:
+        other.append(f'{kind} {path}' + (what(path) if kind == 'changed' else ''))
+print(f'COUNTS {len(entries)} {len(explained)} {len(sensitive)} {len(other)}')
+for s in sensitive: print('SENSITIVE ' + s)
+for o in other: print('OTHER ' + o)
+EOF
+# remember every package's files for the next check
+if ls "$DPKG_INFO"/*.list > /dev/null 2>&1; then
+  awk '{ f = FILENAME; sub(/.*\//, "", f); sub(/\.list$/, "", f); sub(/:.*/, "", f); print $0 "\t" f }' "$DPKG_INFO"/*.list \
+    | gzip -c > "$snapshot.tmp" && mv -f "$snapshot.tmp" "$snapshot"
+fi
+read -r _ total explained sensitive other < <(grep '^COUNTS' "$work/result")
+summary="$(date '+%F %T') changes=$total explained=$explained sensitive=$sensitive other=$other"
+echo "$summary" >> "$DK_STATE/aide-history"
+tail -n 60 "$DK_STATE/aide-history" > "$DK_STATE/aide-history.tmp" && mv "$DK_STATE/aide-history.tmp" "$DK_STATE/aide-history"
+log "$total changes: $explained explained (updates or the install scripts), $sensitive unexplained in sensitive places, $other unexplained elsewhere"
+grep -E '^(SENSITIVE|OTHER) ' "$work/result" | head -200 | sed 's/^/    /' | tee -a "$LOG_FILE" > /dev/null
+
+if [ "$sensitive" -gt 0 ]; then
+  list=$(grep '^SENSITIVE ' "$work/result" | cut -d' ' -f2- | head -8)
+  more=""; [ "$sensitive" -gt 8 ] && more=$'\n'"… and $((sensitive - 8)) more"
+  notify "File integrity: $sensitive unexpected change(s)" \
+    "Changed without an update or one of dk-srv's install scripts:
+$list$more
+Did you change these yourself? If not: someone may be on the server. Details: sudo tail -50 $LOG_FILE" urgent rotating_light
+fi
+grep '^SENSITIVE \|^OTHER ' "$work/result" | head -20
+exit 0

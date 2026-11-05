@@ -1,0 +1,98 @@
+#!/usr/bin/python3 -I
+"""Sends a push notification to your phone through ntfy (https://ntfy.sh).
+
+    dk-notify "Title" "Message" [priority] [tags]
+
+    priority  min | low | default | high | urgent   (default: default)
+    tags      comma-separated ntfy tags, shown as emojis (e.g. warning,lock)
+
+    dk-notify --test     sends a test message (exits with 1 if it couldn't be sent)
+
+Everything that wants to tell you something on the server calls this: the nightly security check,
+lockdown, the apps (maintenance mode, their backups …), SSH logins (pam_exec), fail2ban. Installed by
+install.sh to /usr/local/sbin/dk-notify (owned by root).
+
+The topic comes from /etc/dk-srv/notify.conf (NTFY_TOPIC=..., optional NTFY_SERVER=...), which
+only root and the app users' group can read: whoever knows the topic can read and send your notifications.
+
+It never makes the caller fail: if the message can't be sent (no network, ntfy down, no config),
+it says so in the system log (`journalctl -t dk-notify`) and exits with 0.
+Messages go through the public ntfy.sh server: short texts only, never passwords or secrets.
+"""
+import json
+import os
+import re
+import sys
+import syslog
+import time
+import urllib.request
+
+CONF = os.environ.get("DK_NOTIFY_CONF", "/etc/dk-srv/notify.conf")
+PRIORITIES = {"min": 1, "low": 2, "default": 3, "high": 4, "urgent": 5}
+MAX_MESSAGE = 3500  # ntfy.sh takes 4096 bytes as a message; longer ones become attachments
+
+
+def log(text):
+    syslog.openlog("dk-notify")
+    syslog.syslog(syslog.LOG_WARNING, text)
+    print(f"dk-notify: {text}", file=sys.stderr)
+
+
+def read_conf(path):
+    values = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            m = re.match(r"^\s*([A-Z_]+)\s*=\s*['\"]?([^'\"#\s]*)['\"]?\s*(#.*)?$", line)
+            if m:
+                values[m.group(1)] = m.group(2)
+    return values
+
+
+def main(argv):
+    test = argv[1:2] == ["--test"]
+    if test:
+        argv = [argv[0], "Test", "Notifications from the server work.", "default", "white_check_mark"]
+    if len(argv) < 3 or argv[1] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    title, message = argv[1], argv[2]
+    priority = PRIORITIES.get(argv[3] if len(argv) > 3 else "default", 3)
+    tags = [t for t in (argv[4] if len(argv) > 4 else "").split(",") if t]
+
+    try:
+        conf = read_conf(CONF)
+    except OSError as err:
+        log(f"not sent ({title!r}): can't read {CONF}: {err.strerror}")
+        return 1 if test else 0
+    topic = conf.get("NTFY_TOPIC", "")
+    server = conf.get("NTFY_SERVER", "") or "https://ntfy.sh"
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", topic):
+        log(f"not sent ({title!r}): NTFY_TOPIC in {CONF} is missing or not a valid topic name")
+        return 1 if test else 0
+
+    if len(message.encode()) > MAX_MESSAGE:
+        message = message.encode()[:MAX_MESSAGE].decode(errors="ignore") + "\n…"
+    body = json.dumps({
+        "topic": topic,
+        "title": title,
+        "message": message,
+        "priority": priority,
+        "tags": tags,
+    }).encode()
+    request = urllib.request.Request(server.rstrip("/") + "/", data=body, method="POST",
+                                     headers={"Content-Type": "application/json"})
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                if 200 <= response.status < 300:
+                    return 0
+                error = f"HTTP {response.status}"
+        except Exception as err:  # network errors, HTTP errors, timeouts
+            error = str(err)
+        time.sleep(2 * (attempt + 1))
+    log(f"not sent ({title!r}): {error}")
+    return 1 if test else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

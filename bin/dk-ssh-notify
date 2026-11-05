@@ -1,0 +1,88 @@
+#!/bin/bash
+# Notification for every SSH connection to the server – also your own: an unexpected one means
+# someone else got in. Called by PAM when an SSH session opens (a line in /etc/pam.d/sshd, added by
+# install.sh):
+#   session optional pam_exec.so quiet /usr/local/sbin/dk-ssh-notify
+# "optional": if this fails, the login still works. Everything happens in the background, so the
+# connection never waits for it.
+#
+# What kind of connection it was decides the notification:
+#   Backups pulled         the backup key (authorized_keys line with command="…rrsync -ro …backups…")
+#                          – it can only read the backups (e.g. the storybook's backup pull)
+#   SSH login (terminal)   someone got a shell
+#   SSH file transfer      rsync, scp or sftp without a terminal (download or upload)
+#   SSH command            another command without a terminal, or one too short to see
+# The key comes from sshd (SSH_AUTH_INFO_0, OpenSSH 7.6+) and is looked up in the user's
+# authorized_keys – its comment (the last word of the line, e.g. "laptop") is shown. The rest is
+# seen by watching the connection's processes for up to 3 seconds.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+[ "${PAM_TYPE:-}" = open_session ] || exit 0
+user=${PAM_USER:-?}
+from=${PAM_RHOST:-unknown address}
+parent=$PPID          # sshd's process for this connection (its children are the session)
+auth=${SSH_AUTH_INFO_0:-}
+NOTIFY=${NOTIFY_BIN:-/usr/local/sbin/dk-notify}
+
+(
+  when=$(date '+%F %H:%M %Z')
+  # --- which key? -----------------------------------------------------------------------------
+  method=$(printf '%s' "$auth" | head -1 | awk '{print $1}')
+  blob=$(printf '%s' "$auth" | head -1 | awk '{print $3}')
+  home=$(getent passwd "$user" | cut -d: -f6)
+  key_line=""
+  if [ -n "$blob" ] && [ -r "$home/.ssh/authorized_keys" ]; then
+    key_line=$(grep -F -- "$blob" "$home/.ssh/authorized_keys" 2>/dev/null | head -1)
+  fi
+  comment=$(printf '%s' "$key_line" | awk -v b="$blob" '{ for (i = 1; i <= NF; i++) if ($i == b) { c = ""; for (j = i + 1; j <= NF; j++) c = c (c ? " " : "") $j; print c; exit } }')
+  key_text="key: ${comment:-without a name}"
+  [ "$method" = publickey ] || key_text="login method: ${method:-unknown}"
+  [ "$method" = publickey ] && [ -z "$key_line" ] && key_text="a key that's NOT in authorized_keys"
+
+  # --- the backup key: only reads the backups (rrsync -ro) --------------------------------------
+  case "$key_line" in
+    *command=*rrsync*-ro*backups*)
+      "$NOTIFY" "Backups pulled" "The backups were fetched from $from at $when ($key_text, read-only)." low floppy_disk
+      exit 0 ;;
+  esac
+
+  # --- otherwise: what does the session do? -----------------------------------------------------
+  kind=command what=""
+  for _ in $(seq 1 150); do            # up to 3 s, every 20 ms
+    [ -d "/proc/$parent" ] || break
+    for c in $(pgrep -P "$parent" 2>/dev/null); do
+      title=$(tr '\0' ' ' < "/proc/$c/cmdline" 2>/dev/null)
+      case "$title" in *@pts/*) kind=terminal; break 3 ;; esac
+      for g in $(pgrep -P "$c" 2>/dev/null); do
+        cmd=$(tr '\0' ' ' < "/proc/$g/cmdline" 2>/dev/null)
+        case "$cmd" in
+          "") continue ;;
+          *"rsync --server --sender"*) kind=transfer what="rsync download (files copied from the server)" ;;
+          *"rsync --server"*) kind=transfer what="rsync upload (files copied to the server)" ;;
+          *sftp-server*) kind=transfer what="sftp/scp (file transfer)" ;;
+          *"scp "*" -f "*|*"scp -f "*) kind=transfer what="scp download" ;;
+          *"scp "*" -t "*|*"scp -t "*) kind=transfer what="scp upload" ;;
+          *git-upload-pack*|*git-receive-pack*) kind=transfer what="git" ;;
+          *" -c "*) c2=${cmd#* -c }; what="command: ${c2%% *}" ;;
+          *) what="command: ${cmd%% *}" ;;
+        esac
+        break 3
+      done
+    done
+    sleep 0.02
+  done
+
+  case "$kind" in
+    terminal)
+      "$NOTIFY" "SSH login: $user" \
+        "$user logged in with a terminal from $from at $when ($key_text). Not you? Remove that key from ~/.ssh/authorized_keys and check: last -a" \
+        default key ;;
+    transfer)
+      "$NOTIFY" "SSH file transfer: $user" "$what from $from at $when ($key_text)." low "inbox_tray" ;;
+    *)
+      "$NOTIFY" "SSH command: $user" \
+        "${what:-a short command or file transfer (over before it could be seen)} – no terminal – from $from at $when ($key_text). Not you? Check: sudo journalctl -t sshd -t sshd-session --since today" \
+        default computer ;;
+  esac
+) < /dev/null > /dev/null 2>&1 &
+disown 2>/dev/null
+exit 0

@@ -1,0 +1,90 @@
+## Audit rules of the server – installed by dk-srv hardening/install-hardening.sh (part
+## "auditd") as /etc/audit/rules.d/60-dk-srv-cis.rules. CIS Ubuntu 24.04 Level 2 (6.3.3),
+## What gets recorded (search with: sudo ausearch -k <key> -i):
+##   time-change, identity (users/groups/passwords/PAM), system-locale (name, network), scope
+##   (sudo rules), user_emulation (commands as another user), sudo_log_file, logins, session,
+##   perm_mod (permission changes by people), access (refused file access), mounts, delete,
+##   MAC-policy (AppArmor), perm_chng/usermod/kernel_modules, privileged (setuid programs, own file)
+##   plus the server's own: dk-srv-config, dk-srv-scripts, sshd, ssh-keys, nginx, cron, and each
+##   app's sensitive places (app-<app>, from AIDE_SENSITIVE in /etc/dk-srv/apps.d/ – added below by
+##   the installer).
+
+## time
+-a always,exit -F arch=b64 -S adjtimex,settimeofday,clock_settime -k time-change
+-a always,exit -F arch=b32 -S adjtimex,settimeofday,clock_settime -k time-change
+-w /etc/localtime -p wa -k time-change
+
+## users, groups, passwords, PAM
+-w /etc/group -p wa -k identity
+-w /etc/passwd -p wa -k identity
+-w /etc/gshadow -p wa -k identity
+-w /etc/shadow -p wa -k identity
+-w /etc/security/opasswd -p wa -k identity
+-w /etc/nsswitch.conf -p wa -k identity
+-w /etc/pam.conf -p wa -k identity
+-w /etc/pam.d -p wa -k identity
+
+## host name and network
+-a always,exit -F arch=b64 -S sethostname,setdomainname -k system-locale
+-a always,exit -F arch=b32 -S sethostname,setdomainname -k system-locale
+-w /etc/issue -p wa -k system-locale
+-w /etc/issue.net -p wa -k system-locale
+-w /etc/hosts -p wa -k system-locale
+-w /etc/networks -p wa -k system-locale
+-w /etc/netplan/ -p wa -k system-locale
+
+## sudo
+-w /etc/sudoers -p wa -k scope
+-w /etc/sudoers.d -p wa -k scope
+-a always,exit -F arch=b64 -C euid!=uid -F auid!=unset -S execve -k user_emulation
+-a always,exit -F arch=b32 -C euid!=uid -F auid!=unset -S execve -k user_emulation
+-w /var/log/sudo.log -p wa -k sudo_log_file
+
+## logins and sessions
+-w /var/log/lastlog -p wa -k logins
+-w /var/run/faillock -p wa -k logins
+-w /var/run/utmp -p wa -k session
+-w /var/log/wtmp -p wa -k session
+-w /var/log/btmp -p wa -k session
+
+## permission changes and refused access – by people (auid >= 1000), not by services
+-a always,exit -F arch=b64 -S chmod,fchmod,fchmodat -F auid>=1000 -F auid!=unset -k perm_mod
+-a always,exit -F arch=b32 -S chmod,fchmod,fchmodat -F auid>=1000 -F auid!=unset -k perm_mod
+-a always,exit -F arch=b64 -S chown,fchown,lchown,fchownat -F auid>=1000 -F auid!=unset -k perm_mod
+-a always,exit -F arch=b32 -S chown,fchown,lchown,fchownat -F auid>=1000 -F auid!=unset -k perm_mod
+-a always,exit -F arch=b64 -S setxattr,lsetxattr,fsetxattr,removexattr,lremovexattr,fremovexattr -F auid>=1000 -F auid!=unset -k perm_mod
+-a always,exit -F arch=b32 -S setxattr,lsetxattr,fsetxattr,removexattr,lremovexattr,fremovexattr -F auid>=1000 -F auid!=unset -k perm_mod
+-a always,exit -F arch=b64 -S creat,open,openat,truncate,ftruncate -F exit=-EACCES -F auid>=1000 -F auid!=unset -k access
+-a always,exit -F arch=b64 -S creat,open,openat,truncate,ftruncate -F exit=-EPERM -F auid>=1000 -F auid!=unset -k access
+-a always,exit -F arch=b32 -S creat,open,openat,truncate,ftruncate -F exit=-EACCES -F auid>=1000 -F auid!=unset -k access
+-a always,exit -F arch=b32 -S creat,open,openat,truncate,ftruncate -F exit=-EPERM -F auid>=1000 -F auid!=unset -k access
+
+## mounts and deletions by people
+-a always,exit -F arch=b64 -S mount -F auid>=1000 -F auid!=unset -k mounts
+-a always,exit -F arch=b32 -S mount -F auid>=1000 -F auid!=unset -k mounts
+-a always,exit -F arch=b64 -S rename,unlink,unlinkat,renameat -F auid>=1000 -F auid!=unset -k delete
+-a always,exit -F arch=b32 -S rename,unlink,unlinkat,renameat -F auid>=1000 -F auid!=unset -k delete
+
+## AppArmor, ACL tools, user changes, kernel modules
+-w /etc/apparmor/ -p wa -k MAC-policy
+-w /etc/apparmor.d/ -p wa -k MAC-policy
+-a always,exit -F path=/usr/bin/chcon -F perm=x -F auid>=1000 -F auid!=unset -k perm_chng
+-a always,exit -F path=/usr/bin/setfacl -F perm=x -F auid>=1000 -F auid!=unset -k perm_chng
+-a always,exit -F path=/usr/bin/chacl -F perm=x -F auid>=1000 -F auid!=unset -k perm_chng
+-a always,exit -F path=/usr/sbin/usermod -F perm=x -F auid>=1000 -F auid!=unset -k usermod
+-a always,exit -F arch=b64 -S init_module,finit_module,delete_module -F auid>=1000 -F auid!=unset -k kernel_modules
+-a always,exit -F path=/usr/bin/kmod -F perm=x -F auid>=1000 -F auid!=unset -k kernel_modules
+
+## the server's own sensitive places: its settings, what root runs, the root-owned clones
+-w /etc/dk-srv/ -p wa -k dk-srv-config
+-w /usr/local/sbin/ -p wa -k dk-srv-scripts
+-w /usr/local/lib/dk-srv/ -p wa -k dk-srv-scripts
+-w /opt/dk-srv/ -p wa -k dk-srv-scripts
+-w /opt/dk-apps/ -p wa -k dk-srv-scripts
+-w /etc/ssh/sshd_config -p wa -k sshd
+-w /etc/ssh/sshd_config.d/ -p wa -k sshd
+-w @ADMIN_HOME@/.ssh/ -p wa -k ssh-keys
+-w /root/.ssh/ -p wa -k ssh-keys
+-w /etc/nginx/ -p wa -k nginx
+-w /etc/cron.d/ -p wa -k cron
+-w /etc/crontab -p wa -k cron

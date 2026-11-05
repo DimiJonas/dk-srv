@@ -1,0 +1,111 @@
+#!/bin/bash
+# Gets a static site's files from its repository and puts them on the web – on the server:
+#
+#   sudo dk-site-update <name>             pull, show what changed, check every file, install
+#   sudo dk-site-update <name> --check     only pull and check (installs nothing)
+#
+# <name> is a site in /etc/dk-srv/sites.d/<name>.conf (REPO, SUBDIR – see etc/site.conf.example).
+# The repository is cloned once, root-owned, to /opt/dk-sites/<name> (a private one with the read
+# token in /etc/dk-srv/git-credentials). Then every file in SUBDIR is checked and copied to
+# /var/www/<name> (root-owned, 755/644), all at once – the site never shows half an update.
+#
+# Safe by design (HARDENING.md, "Static sites"): only these files, each checked by its CONTENT,
+# not by its name:
+#   .html .htm (HTML)  .css  .txt  .ico  .jpg .jpeg (JPEG)  .png  .webp
+# no hidden files or folders, no symbolic links, at most 20 MB per file and 100 MB in total.
+# Pictures are copied with their metadata (camera, date, GPS position!) removed – only the rotation
+# and the colour profile stay. Anything else stops the update: nothing is installed.
+# nginx then serves the folder with strict rules (nginx/static-site.conf: no scripts, only these
+# types, no symbolic links, no folder listings).
+set -euo pipefail
+. "${DK_LIB:-/usr/local/lib/dk-srv}/security-lib.sh"
+: "${DK_SITES_SRC:=/opt/dk-sites}"
+: "${WWW_DIR:=/var/www}"
+: "${MAX_FILE:=20971520}"
+: "${MAX_TOTAL:=104857600}"
+
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 2; }
+[ $# -ge 1 ] || usage
+name=$1 check_only=no
+[ "${2:-}" = --check ] && check_only=yes
+need_root "$@"
+die() { echo "Stopped: $*" >&2; exit 1; }
+
+[[ $name =~ ^[a-z0-9][a-z0-9.-]*$ ]] && [ -f "$SITES_DIR/$name.conf" ] || die "no site \"$name\" in $SITES_DIR/ (a file $name.conf – see /opt/dk-srv/etc/site.conf.example)"
+repo=$(site_get "$name" REPO) sub=$(site_get "$name" SUBDIR)
+valid_repo_url "$repo" || die "REPO in $SITES_DIR/$name.conf must be an https:// address"
+[[ ${sub:-.} =~ ^[A-Za-z0-9._/-]+$ && ${sub:-.} != *..* ]] || die "SUBDIR in $SITES_DIR/$name.conf isn't a plain folder name"
+src="$DK_SITES_SRC/$name"
+
+# --- 1. the repository (root-owned, readable only by root: a private site stays private) --------
+install -d -o root -g root -m 755 "$DK_SITES_SRC"
+if [ ! -d "$src/.git" ]; then
+  echo "== cloning $repo to $src"
+  git_clone "$repo" "$src" || die "couldn't clone $repo (a private repository needs the read token: see setup-commands.txt)"
+  chmod 700 "$src"
+  before=""
+else
+  before=$(git -C "$src" rev-parse HEAD)
+  git_follow "$src" || die "couldn't get the repository's state into $src (no connection? token expired?)"
+fi
+[ -d "$DK_STATE" ] && echo "$src" >> "$DK_STATE/aide-expected"   # (changed on purpose, for the file integrity check)
+after=$(git -C "$src" rev-parse HEAD)
+if [ -n "$before" ] && [ "$before" != "$after" ]; then
+  echo "== new commits:"; git -C "$src" log --oneline "$before..$after" | sed 's/^/   /'
+fi
+dir="$src/${sub:-.}"
+[ -d "$dir" ] || die "the repository has no folder ${sub:-.}"
+
+# --- 2. check every file ------------------------------------------------------------------------
+command -v exiftool > /dev/null || die "exiftool is missing (sudo apt install libimage-exiftool-perl) – it removes the pictures' metadata"
+work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+mkdir "$work/site"
+total=0 count=0
+while IFS= read -r -d '' f; do
+  rel=${f#"$dir"/}
+  [ -L "$f" ] && die "$rel is a symbolic link"
+  [ -d "$f" ] && { [[ ${rel##*/} == .* ]] && die "hidden folder: $rel"; continue; }
+  [ -f "$f" ] || die "$rel isn't a regular file"
+  [[ $rel =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*){0,3}$ ]] || die "$rel: only plain names, no hidden files, at most 3 folders deep"
+  size=$(stat -c %s "$f"); total=$((total + size))
+  [ "$size" -le "$MAX_FILE" ] || die "$rel is bigger than $MAX_FILE bytes"
+  [ "$total" -le "$MAX_TOTAL" ] || die "the site is bigger than $MAX_TOTAL bytes"
+  ext=${rel##*.}; ext=${ext,,}
+  mime=$(file --brief --mime-type -- "$f")
+  case "$ext:$mime" in
+    html:text/html|htm:text/html|css:text/plain|css:text/css|txt:text/plain|ico:image/vnd.microsoft.icon|ico:image/x-icon) kind=text ;;
+    jpg:image/jpeg|jpeg:image/jpeg|png:image/png|webp:image/webp) kind=picture ;;
+    *) die "$rel: \"$mime\" by its content – not allowed here (only HTML, CSS, text, icons, JPEG, PNG, WebP)" ;;
+  esac
+  mkdir -p "$work/site/$(dirname "$rel")"
+  if [ "$kind" = picture ]; then
+    exiftool -q -q -all= -tagsFromFile @ -Orientation -ICC_Profile -o "$work/site/$rel" -- "$f" || die "exiftool couldn't make a clean copy of $rel"
+    [ "$(file --brief --mime-type -- "$work/site/$rel")" = "$mime" ] || die "the cleaned copy of $rel isn't a $mime any more"
+    left=$(exiftool -q -q -s -GPS:all -XMP:all -IPTC:all -- "$work/site/$rel" 2>/dev/null || true)
+    [ -z "$left" ] || die "metadata is still in $rel: $left"
+  else
+    cp -- "$f" "$work/site/$rel"
+  fi
+  count=$((count + 1))
+done < <(find "$dir" -mindepth 1 \( -name .git -prune \) -o -print0)
+[ "$count" -gt 0 ] || die "no files in ${sub:-.}"
+[ -e "$work/site/index.html" ] || echo "   note: no index.html – the start page answers 404"
+echo "== checked: $count file(s), $((total / 1024)) KB – all allowed"
+[ "$check_only" = yes ] && { echo "(--check: nothing installed)"; exit 0; }
+
+# --- 3. install: a complete new folder, then swapped in -----------------------------------------
+target="$WWW_DIR/$name"
+install -d -o root -g root -m 755 "$WWW_DIR"
+rm -rf "$WWW_DIR/.$name.new" "$WWW_DIR/.$name.old"
+owner=(-o root -g root); [ -n "$DK_TEST" ] && owner=()
+install -d "${owner[@]}" -m 755 "$WWW_DIR/.$name.new"
+(cd "$work/site" && find . -mindepth 1 -type d -print0) | while IFS= read -r -d '' d; do install -d "${owner[@]}" -m 755 "$WWW_DIR/.$name.new/$d"; done
+(cd "$work/site" && find . -type f -print0) | while IFS= read -r -d '' f; do install "${owner[@]}" -m 644 "$work/site/$f" "$WWW_DIR/.$name.new/$f"; done
+if [ -e "$target" ]; then mv "$target" "$WWW_DIR/.$name.old"; fi
+mv "$WWW_DIR/.$name.new" "$target"
+rm -rf "$WWW_DIR/.$name.old"
+[ -d "$DK_STATE" ] && echo "$target" >> "$DK_STATE/aide-expected"
+echo "== $name: $count file(s) in $target"
+if [ ! -L "$NGINX_DIR/sites-enabled/static-$name" ]; then
+  echo "   the site isn't switched on in nginx yet: sudo /opt/dk-srv/nginx/install-nginx.sh"
+fi

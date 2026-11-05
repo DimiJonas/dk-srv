@@ -1,0 +1,39 @@
+# Log rotation of the server – installed by install.sh to /etc/dk-srv/logrotate.conf.
+#
+# It runs every hour from /etc/cron.d/dk-srv, with its own state file
+# (/var/lib/dk-srv/logrotate.status) – not from Ubuntu's once-a-day run – so a log that suddenly
+# grows (someone flooding a site with requests) is cut off within the hour instead of filling the
+# disk. Old copies: <name>.1 (not yet compressed), <name>.2.gz, <name>.3.gz, … – the newest first.
+# The apps add their own logs in /etc/dk-srv/logrotate.d/<app> (written by their install).
+#
+# Not here (Ubuntu rotates them itself): nginx (daily, 14 days), fail2ban, PostgreSQL, the journal.
+#
+# Try it:  sudo logrotate --debug --state /var/lib/dk-srv/logrotate.status /etc/dk-srv/logrotate.conf
+#          (shows what it would do, changes nothing)
+
+compress
+delaycompress
+missingok
+notifempty
+
+# sudo's own log (every sudo command): monthly, a year kept. "su root adm": /var/log is writable
+# for the group syslog (Ubuntu), so logrotate refuses to work there as root unless told which user
+# and group to work as – the same line Ubuntu's own /etc/logrotate.conf has.
+/var/log/sudo.log {
+    su root adm
+    monthly
+    maxsize 20M
+    rotate 12
+    create 0600 root root
+}
+
+# The security check, the weekly report, the file integrity check, the hardening log and this
+# rotation's own error messages.
+/var/log/dk-srv/*.log {
+    monthly
+    maxsize 20M
+    rotate 12
+    create 0640 root adm
+}
+
+include /etc/dk-srv/logrotate.d

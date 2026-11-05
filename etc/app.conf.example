@@ -1,0 +1,32 @@
+# How an app tells dk-srv about itself: /etc/dk-srv/apps.d/<app>.conf, written by the app's
+# ops/root/install.sh (run by `sudo dk-app-update <app>`). Read, never run: only KEY=value lines.
+# Every key is optional; what's missing is simply not checked.
+
+# who runs it and where its copy for running is
+APP_USER=appuser
+RUNTIME_DIR=/home/appuser/myapp
+# its pm2 process (restarted after a Node.js update) and whether it uses Node.js at all
+PM2_PROCESS=backend
+NODE=yes
+# its address (checked after switching modes; certificate days in the weekly report)
+SITE_URL=https://myapp.example.org
+# its login address: wrong (401) and blocked (429) logins are counted in the weekly report
+LOGIN_PATH=/api/login
+# folders inside RUNTIME_DIR for the nightly npm audit (critical -> its maintenance mode)
+NPM_DIRS="server client"
+# its mode command: status [--short] | maintenance | normal [--force] | stop | start, each with an
+# optional --reason "…" – a root-owned program in /usr/local/sbin (installed by its install.sh)
+MODE_CMD=/usr/local/sbin/myapp-mode
+# its nginx sites (in /etc/nginx/sites-available/)
+NGINX_SITES="myapp myapp-maintenance"
+# file integrity check: places that change all the time (left out) and its sensitive places
+AIDE_EXCLUDE="/srv/myapp/uploads /home/appuser/backups"
+AIDE_SENSITIVE="/etc/myapp"
+# the weekly report: "backup done" lines per night, the last restore test
+BACKUP_LOG=/home/appuser/backups/myapp/backup.log
+RESTORE_TEST_LOG=/home/appuser/backups/myapp/restore-test.log
+# PostgreSQL (hardening part "postgres"): its databases (created if missing, owned by DB_OWNER),
+# only DB_OWNER may connect; databases without pgAudit logging (e.g. a restore-test database)
+DATABASES="myapp myapp_restoretest"
+DB_OWNER=webapp
+DB_NO_AUDIT="myapp_restoretest"

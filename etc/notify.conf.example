@@ -1,0 +1,5 @@
+# ntfy topic for the server's notifications (dk-notify, and the apps). install.sh asks for it and
+# writes /etc/dk-srv/notify.conf (readable only by root and NOTIFY_GROUP) – never put the real topic
+# into git, patches or chats: whoever knows it can read and send your notifications.
+NTFY_TOPIC=dk-REPLACE-WITH-YOUR-RANDOM-TOPIC
+# NTFY_SERVER=https://ntfy.sh

@@ -1,0 +1,97 @@
+#!/bin/bash
+# Installs or updates the parts of an app that run as root – on the server:
+#
+#   sudo dk-app-update <app> https://github.com/<you>/<app>    the first time (clones it)
+#   sudo dk-app-update <app>                                   later: pull, show, ask, install
+#   sudo dk-app-update <app> --yes                             without asking (after reading it)
+#
+# Every app keeps what root runs for it in ONE folder of its repository: ops/root/ (its nginx
+# sites, its mode command, its file in /etc/dk-srv/apps.d/, its log rotation – see the app's
+# ops/root/README.md). dk-app-update keeps a root-owned copy of just that folder in
+# /opt/dk-apps/<app> (a sparse, partial clone: the rest of the app is neither downloaded nor
+# checked out) and runs its ops/root/install.sh from there. So root never runs files that the
+# app's own user (and so a hole in the app) could change – the app user's copy (e.g. ~/storybook)
+# is only for running the app.
+#
+# Before installing, it shows what changed in ops/root/ since the last time and asks. Afterwards:
+# the app's AIDE rules (what to leave out of the file integrity check) from its apps.d file.
+set -euo pipefail
+. "${DK_LIB:-/usr/local/lib/dk-srv}/security-lib.sh"
+: "${DK_APPS_SRC:=/opt/dk-apps}"
+: "${AIDE_CONF_D:=/etc/aide/aide.conf.d}"
+
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 2; }
+[ $# -ge 1 ] || usage
+app=$1; shift
+url="" yes=no
+for a in "$@"; do case "$a" in --yes) yes=yes ;; https://*|file://*) url=$a ;; *) usage ;; esac; done
+need_root
+die() { echo "Stopped: $*" >&2; exit 1; }
+[[ $app =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "an app's name: lower-case letters, digits and -"
+src="$DK_APPS_SRC/$app"
+
+install -d -o root -g root -m 755 "$DK_APPS_SRC"
+if [ ! -d "$src/.git" ]; then
+  [ -n "$url" ] || die "$app isn't set up yet – the first time with its address: sudo dk-app-update $app https://github.com/<you>/$app"
+  valid_repo_url "$url" || die "only https:// addresses (outgoing SSH stays closed)"
+  echo "== cloning ops/root/ of $url to $src (only that folder)"
+  git_clone "$url" "$src" --filter=blob:none --no-checkout || die "couldn't clone $url (a private repository needs the read token: see setup-commands.txt)"
+  git_root "$src" sparse-checkout set --no-cone /ops/root/
+  git_root "$src" checkout -q || die "couldn't check out ops/root in $src"
+  before=""
+else
+  before=$(git -C "$src" rev-parse HEAD)
+  git_root "$src" sparse-checkout set --no-cone /ops/root/   # (exactly this folder – also for older clones)
+  git_follow "$src" || die "couldn't get the repository's state into $src (no connection? token expired?)"
+fi
+[ -d "$DK_STATE" ] && echo "$src" >> "$DK_STATE/aide-expected"   # (changed on purpose, for the file integrity check)
+after=$(git -C "$src" rev-parse HEAD)
+[ -x "$src/ops/root/install.sh" ] || die "$src has no ops/root/install.sh – is it a dk-srv app?"
+
+if [ -n "$before" ]; then
+  if [ "$before" = "$after" ]; then
+    echo "== $app: no new commits"
+  else
+    echo "== new commits:"; git -C "$src" log --oneline "$before..$after" | sed 's/^/   /'
+    changes=$(git -C "$src" diff --stat "$before" "$after" -- ops/root)
+    if [ -z "$changes" ]; then echo "   (nothing in ops/root/ changed)"
+    else
+      echo "== what root will run changed (ops/root/):"; printf '%s\n' "$changes" | sed 's/^/   /'
+      echo "   all of it: sudo git -C $src diff $before $after -- ops/root"
+    fi
+  fi
+else
+  echo "== the files root will run (ops/root/):"; git -C "$src" ls-files ops/root | sed 's/^/   /'
+fi
+if [ "$yes" = no ]; then
+  if [ -t 0 ]; then
+    read -rp "   Install $app's root parts now? [y/N] " answer
+    [[ $answer =~ ^[yYjJ]$ ]] || { echo "Nothing installed."; exit 0; }
+  else
+    die "not in a terminal – after reading the changes: sudo dk-app-update $app --yes"
+  fi
+fi
+
+echo "== running $app's ops/root/install.sh"
+APP="$app" DK_APP_SRC="$src" "$src/ops/root/install.sh"
+[ -f "$APPS_DIR/$app.conf" ] || die "$app's install.sh didn't write $APPS_DIR/$app.conf"
+chown root:root "$APPS_DIR/$app.conf"; chmod 644 "$APPS_DIR/$app.conf"
+
+# --- the file integrity check: what to leave out, what's sensitive (from the app's apps.d file) ---
+if [ -d "$AIDE_CONF_D" ]; then
+  t=$(mktemp)
+  { echo "# Written by dk-app-update from $APPS_DIR/$app.conf (AIDE_EXCLUDE) – places of the app that"
+    echo "# change all the time; left out of the file integrity check."
+    for p in $(app_get "$app" AIDE_EXCLUDE); do
+      [[ $p =~ ^/[A-Za-z0-9._/@-]+$ ]] || { echo "   WARNING: AIDE_EXCLUDE: \"$p\" isn't a plain path – left out" >&2; continue; }
+      printf '!%s\n' "$(printf '%s' "$p" | sed 's/[.]/\\./g')"
+    done; } > "$t"
+  dest="$AIDE_CONF_D/91_dk-app-$app"
+  if ! cmp -s "$t" "$dest" 2>/dev/null; then
+    install -o root -g root -m 644 "$t" "$dest"
+    echo "== $dest: updated (the next nightly check sees the left-out places as removed once – expected)"
+    { echo "$dest"; app_get "$app" AIDE_EXCLUDE | tr ' ' '\n'; } | grep . >> "$DK_STATE/aide-expected"
+  fi
+  rm -f "$t"
+fi
+echo "== $app: root parts installed (from $(git -C "$src" log -1 --format='%h %s'))"

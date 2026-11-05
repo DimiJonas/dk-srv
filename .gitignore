@@ -1,0 +1,19 @@
+# Never in this repository: anything from a real server
+# (fact sheets and USG reports contain host names, IP and MAC addresses)
+dk-srv-facts-*.txt
+storybook-facts-*.txt
+usg-report-*.html
+usg-results-*.xml
+usg-tailoring.xml
+*.dpkg-dist
+*.dpkg-old
+*.ucf-dist
+# a token or a topic would be in these
+git-credentials
+notify.conf
+
+# editors, systems
+*.swp
+*~
+.DS_Store
+__pycache__/

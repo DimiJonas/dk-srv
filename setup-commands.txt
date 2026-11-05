@@ -1,0 +1,385 @@
+###################################################################################################
+# SETTING UP THE SERVER – a fresh Ubuntu 24.04 server, hardened, ready for apps and static sites
+#
+# Do these steps first; each app has its own setup afterwards (the storybook's:
+# project_setup_commands.txt in its repository). The server of November 2026, which still has
+# the storybook's own server scripts: the last section, "Moving from the storybook's scripts".
+#
+# Where to run each command:
+#   (laptop)  on your own computer
+#   (root)    on the server, logged in as root (only at the very beginning)
+#   (server)  on the server, logged in as appuser
+#
+# SERVER = the server's IP address or name, as you'd type it after `ssh` (e.g. 203.0.113.10)
+#
+# What dk-srv puts where (README.md has the whole list):
+#   /opt/dk-srv                 this repository, owned by root (sudo git -C /opt/dk-srv pull)
+#   /etc/dk-srv/                its settings: dk-srv.conf, notify.conf (the ntfy topic – only
+#                               here), git-credentials (the read token – root only), apps.d/, sites.d/
+#   /usr/local/sbin/dk-*        its commands;  /var/log/dk-srv/  its logs
+###################################################################################################
+
+
+# =================================================================================================
+# 1. SSH key on your laptop (log in with a key instead of a password)
+# =================================================================================================
+
+# (laptop) check whether you already have a key – if this shows a file, skip the next command
+ls ~/.ssh/id_ed25519.pub
+
+# (laptop) create a key (press Enter for the file name; a passphrase is recommended)
+ssh-keygen -t ed25519
+
+# (laptop) copy the key to the server's root account (asks for the root password from the hoster;
+# skip if the hoster already put your key on the server)
+ssh-copy-id root@SERVER
+
+# (laptop) log in as root
+ssh root@SERVER
+
+
+# =================================================================================================
+# 2. Bring the system up to date
+# =================================================================================================
+
+# (root) install all available updates
+apt update && apt full-upgrade -y
+
+# (root) restart if an update needs it (e.g. a new kernel); log in again afterwards
+[ -f /var/run/reboot-required ] && reboot
+
+
+# =================================================================================================
+# 3. Time zone (cron times and backup dates follow it)
+# =================================================================================================
+
+# (root) German time
+timedatectl set-timezone Europe/Berlin
+
+# (root) check: "Time zone: Europe/Berlin" and "System clock synchronized: yes"
+timedatectl
+
+
+# =================================================================================================
+# 4. Own user "appuser" instead of root
+# =================================================================================================
+
+# (root) create the user (asks for a password – make it long: sudo asks for it)
+adduser appuser
+
+# (root) allow appuser to use sudo (administrator commands)
+usermod -aG sudo appuser
+
+# (root) give appuser the same SSH key(s) as root
+rsync --archive --chown=appuser:appuser ~/.ssh /home/appuser
+
+# (laptop) in a NEW terminal: log in as appuser with the key – must work before continuing
+ssh appuser@SERVER
+
+# (server) check that sudo works (asks for appuser's password, then prints "root")
+sudo whoami
+
+
+# =================================================================================================
+# 5. SSH: only keys, no passwords, no root login
+#    Keep one SSH session open while doing this, until a new login has worked.
+# =================================================================================================
+
+# (laptop) make sure logging in with the key works WITHOUT a password (must log you in)
+ssh -o PasswordAuthentication=no appuser@SERVER
+
+# (server) the settings, in their own file. The name starts with "00" because the first value
+# wins, and Ubuntu often has a file there (50-cloud-init.conf) that allows passwords.
+# (Step 13 replaces this file with the full CIS settings.)
+printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\n' | sudo tee /etc/ssh/sshd_config.d/00-dk-srv.conf
+
+# (server) check the SSH config for mistakes, then apply it
+sudo sshd -t && sudo systemctl restart ssh
+
+# (server) check: both lines say "no"
+sudo sshd -T | grep -Ei '^(passwordauthentication|permitrootlogin)'
+
+# (laptop) in a NEW terminal: log in once more – works with the key; a password login is refused
+ssh appuser@SERVER
+ssh -o PubkeyAuthentication=no appuser@SERVER
+
+# (server) only if something went wrong: undo, in the session that's still open
+sudo rm /etc/ssh/sshd_config.d/00-dk-srv.conf && sudo systemctl restart ssh
+
+# Last resort if you're ever locked out: the hosting provider's web console (log in there as
+# appuser with its password – after the hardening, 4 wrong passwords lock it for 15 minutes).
+# Protect the hosting account itself with a strong password and two-factor login.
+
+
+# =================================================================================================
+# 6. Firewall: only SSH and the web ports
+# =================================================================================================
+
+# (server) close everything coming in, allow everything going out (step 13 limits that too)
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+
+# (server) allow SSH – BEFORE switching the firewall on, otherwise you lock yourself out
+sudo ufw allow OpenSSH
+
+# (server) switch it on (answer y; the current SSH session stays connected)
+sudo ufw enable
+
+
+# =================================================================================================
+# 7. Automatic security updates
+# =================================================================================================
+
+# (server) install (usually already there) and switch on – answer "Yes"
+sudo apt install -y unattended-upgrades
+sudo dpkg-reconfigure -plow unattended-upgrades
+
+# (server) check: both lines end in "1"
+cat /etc/apt/apt.conf.d/20auto-upgrades
+
+# (server) restart automatically at 04:30 when an update needs it (a new kernel only protects
+# after a restart). The apps start again by themselves (pm2), and their nightly backups are done
+# by then.
+printf 'Unattended-Upgrade::Automatic-Reboot "true";\nUnattended-Upgrade::Automatic-Reboot-Time "04:30";\n' | sudo tee /etc/apt/apt.conf.d/52unattended-upgrades-reboot
+
+# (server) check which package sources are updated automatically ("Allowed origins")
+sudo unattended-upgrade --dry-run --debug 2>&1 | grep -i 'allowed origins'
+
+
+# =================================================================================================
+# 8. The tools: git, nginx, certificates, fail2ban, picture cleaning, Ubuntu Pro
+# =================================================================================================
+
+# (server) --no-install-recommends: nothing more than asked for (HARDENING.md, "Lessons", 4)
+sudo apt install -y --no-install-recommends git nginx certbot python3-certbot-nginx fail2ban \
+  libimage-exiftool-perl file ubuntu-pro-client
+
+# (server) the web ports 80 (HTTP) and 443 (HTTPS)
+sudo ufw allow 'Nginx Full'
+
+# (server) check: "Status: active", OpenSSH and Nginx Full allowed (also as "(v6)")
+sudo ufw status verbose
+
+# (server) check: the list contains "sshd". If fail2ban doesn't start (older 24.04 packages had a
+# start-up bug): sudo apt update && sudo apt upgrade -y && sudo systemctl restart fail2ban
+sudo fail2ban-client status
+
+# (server) Ubuntu Pro (free for personal use, up to 5 machines – token from
+# https://ubuntu.com/pro/dashboard): more security updates, Livepatch, and the CIS audit tool USG
+sudo pro attach <your Ubuntu Pro token>
+sudo pro enable usg && sudo apt install -y usg
+
+# (server) the CIS audit BEFORE the hardening (read-only, a few minutes): note the score
+sudo usg audit cis_level1_server
+
+
+# =================================================================================================
+# 9. A read token for the private repositories (only while one is private)
+#    The server only ever READS from GitHub, over https (outgoing SSH stays closed).
+#    A public repository needs no token – skip this step if all of them are public.
+# =================================================================================================
+
+# (laptop, browser) GitHub → your picture (top right) → Settings → Developer settings →
+#   Personal access tokens → Fine-grained tokens → Generate new token:
+#   - Token name: "dk-srv server (read)";  Expiration: e.g. 1 year – note the date
+#   - Repository access: "Only select repositories" → only the private ones the server pulls
+#     (e.g. DimiJonas/dk-home)
+#   - Permissions → Repository permissions → Contents: "Read-only" (Metadata read-only comes with
+#     it) – nothing else
+#   Copy the token (github_pat_…) – it's shown only once.
+
+# (server) store it, readable only by root. `read -rs` doesn't show what you paste, and it never
+# lands in the shell history or on a command line.
+sudo install -d -o root -g root -m 755 /etc/dk-srv
+read -rsp 'GitHub token: ' T; echo; printf 'https://DimiJonas:%s@github.com\n' "$T" | sudo tee /etc/dk-srv/git-credentials > /dev/null; unset T
+sudo chmod 600 /etc/dk-srv/git-credentials
+# (server) check: "600 root:root" and one line (don't print it)
+sudo stat -c '%a %U:%G' /etc/dk-srv/git-credentials; sudo wc -l /etc/dk-srv/git-credentials
+
+# A new token later (it expired, or the list of repositories changed): the same three commands.
+# The weekly report warns 30 days before it expires – set the date in step 10 (GIT_TOKEN_EXPIRES).
+
+
+# =================================================================================================
+# 10. dk-srv itself: the clone, the commands, the nightly checks, notifications
+# =================================================================================================
+
+# (server) a random ntfy topic – subscribe to it in the ntfy app (＋, server ntfy.sh); keep it
+# to yourself: whoever knows it can read and send your notifications
+echo "dk-$(openssl rand -hex 16)"
+
+# (server) the clone, owned by root (so nothing root runs can be changed by appuser). The
+# credential setting is stored in the clone, so later `sudo git -C /opt/dk-srv pull` works too
+# (with a public dk-srv the token simply isn't needed).
+sudo git clone -c credential.helper='store --file=/etc/dk-srv/git-credentials' https://github.com/DimiJonas/dk-srv /opt/dk-srv
+
+# (server) install: the dk-* commands, cron, log rotation, the SSH-login notification, fail2ban.
+# Asks for the ntfy topic once (stored only in /etc/dk-srv/notify.conf) and sends a test message.
+sudo /opt/dk-srv/install.sh
+
+# (server) the settings: MODE=trial for now (the nightly check only notifies), and the token's
+# expiry date, e.g. GIT_TOKEN_EXPIRES=2027-11-05 (empty without a token)
+sudo nano /etc/dk-srv/dk-srv.conf
+
+# (server) nginx for the whole server: default-deny (no answer for the bare IP address), TLS 1.2/1.3
+sudo /opt/dk-srv/nginx/install-nginx.sh
+
+# (server) check: the bare IP address gets no answer ("Empty reply from server" / connection closed)
+curl -sI http://127.0.0.1; echo "exit code $? (52 = closed without an answer, as it should be)"
+
+
+# =================================================================================================
+# 11. The apps
+#     Each app's own setup (the storybook's: project_setup_commands.txt in its repository). It
+#     ends with registering the app's root parts:
+#       sudo dk-app-update storybook https://github.com/DimiJonas/storybook
+#     Do this before step 13: the hardening reads the apps' settings (databases, sensitive places).
+# =================================================================================================
+
+
+# =================================================================================================
+# 12. A static site (e.g. the main domain with one picture) – HARDENING.md, "Static sites"
+#     NAME = the site's address, e.g. example.org (its DNS "A" record points to this server)
+# =================================================================================================
+
+# (server) a certificate for it (and its www. name, if it has one); renews itself (certbot.timer).
+# If the app's certificate already covers the name, skip this and use that one's folder below.
+sudo certbot certonly --nginx -d NAME -d www.NAME
+sudo certbot certificates            # note "Certificate Path: /etc/letsencrypt/live/<FOLDER>/…"
+
+# (server) its settings: NAME, ALIASES, CERT_NAME=<FOLDER>, REPO=https://github.com/…, SUBDIR
+sudo install -d -m 755 /etc/dk-srv/sites.d
+sudo cp /opt/dk-srv/etc/site.conf.example /etc/dk-srv/sites.d/NAME.conf
+sudo nano /etc/dk-srv/sites.d/NAME.conf
+
+# (server) its files: cloned, every file checked, picture metadata removed, put on the web
+sudo dk-site-update NAME
+
+# (server) switch it on in nginx (only after dk-site-update: it creates the folder)
+sudo /opt/dk-srv/nginx/install-nginx.sh
+
+# (server) check: 200 for the page, the picture as image/jpeg with a CSP without scripts
+curl -sI https://NAME | head -1
+curl -sI https://NAME/picture.jpg | grep -iE '^HTTP|content-type|content-security'
+
+# Later, after a push to the site's repository: sudo dk-site-update NAME (maintenance-commands.txt)
+
+
+# =================================================================================================
+# 13. Hardening by the CIS guide – HARDENING.md explains every part, SECURITY.md the result
+#     Keep a SECOND SSH session open the whole time (for the parts "ssh" and "pam" also a root
+#     shell in it: sudo -i).
+# =================================================================================================
+
+# (server) see what would change, then apply it part by part
+sudo /opt/dk-srv/hardening/install-hardening.sh --dry-run all
+sudo /opt/dk-srv/hardening/install-hardening.sh packages ssh
+# (laptop) in a NEW terminal: the login still works – only then go on
+ssh appuser@SERVER
+sudo /opt/dk-srv/hardening/install-hardening.sh kernel accounts logging firewall postgres
+sudo /opt/dk-srv/hardening/install-hardening.sh pam
+# (server) in a NEW session: sudo still works with your password
+sudo -k; sudo true
+# (aide last: it builds its database of all files – a few minutes)
+sudo /opt/dk-srv/hardening/install-hardening.sh auditd aide
+
+# (server) the nightly checks again (they now find the AIDE timer etc.)
+sudo /opt/dk-srv/install.sh
+
+# (server) restart once (/tmp, AppArmor/audit on the kernel command line, the locked audit rules)
+sudo reboot
+
+# (server) after the restart: the kernel command line has apparmor=1 security=apparmor audit=1 …,
+# the AIDE timer is on (next run 05:40), nothing new listens on the network, the hardening is in
+# place (the 4th command prints nothing), and every app is "normal"
+cat /proc/cmdline
+systemctl list-timers dailyaidecheck.timer
+sudo ss -tlnp | grep -v 127.0.0
+sudo bash -c '. /usr/local/lib/dk-srv/security-lib.sh; hardening_drift'
+sudo dk-mode status
+
+
+# =================================================================================================
+# 14. Measure: the CIS audit AFTER, with all rules and without the accepted risks
+#     (SECURITY.md, "Accepted risks") – note both scores in SECURITY.md
+# =================================================================================================
+
+sudo usg generate-tailoring cis_level1_server /tmp/usg-tailoring.xml
+sudo python3 /opt/dk-srv/hardening/make-tailoring.py /tmp/usg-tailoring.xml /etc/dk-srv/usg-tailoring.xml
+sudo usg audit cis_level1_server
+sudo usg audit --tailoring-file /etc/dk-srv/usg-tailoring.xml
+
+# (server) a read-only, anonymised fact sheet for a review (~/dk-srv-facts-<date>.txt) – never
+# commit it or the USG reports (they contain the IP and MAC addresses; .gitignore excludes them)
+sudo /opt/dk-srv/hardening/collect-facts.sh
+
+
+# =================================================================================================
+# 15. Final checks
+# =================================================================================================
+
+# (server) the root account has no password login ("L" or "NP" in the second column)
+sudo passwd -S root
+
+# (server) from outside only 22, 80, 443; everything else only on 127.0.0.1 / [::1]
+sudo ss -tlnp
+
+# (server) the weekly report now, on the screen
+sudo dk-weekly-report --print
+
+# (laptop) optional online checks: https://www.ssllabs.com/ssltest/ and https://securityheaders.com
+
+# When the checks have been quiet for a while: MODE=auto in /etc/dk-srv/dk-srv.conf (the nightly
+# check then switches an app's maintenance mode or the server's lockdown on by itself).
+
+
+###################################################################################################
+# MOVING FROM THE STORYBOOK'S SCRIPTS (once, on the server of November 2026)
+#
+# Until the split, the server scripts lived in the storybook repository (ops/security,
+# ops/hardening, ops/install-nginx.sh, …) and root ran them from ~/storybook. Afterwards dk-srv
+# runs them from /opt/dk-srv, and the storybook's root parts come from /opt/dk-apps/storybook.
+# Nothing about the hardening changes – only names and places (…storybook… -> …dk-srv…).
+#
+# Order: the storybook's split update first (deployed as usual – its own maintenance commands),
+# then these steps. Keep a SECOND SSH session open with a root shell (sudo -i) the whole time.
+###################################################################################################
+
+# (server) step 9: the read token – while dk-srv and the storybook are still private, for all
+# three: DimiJonas/dk-srv, DimiJonas/storybook, DimiJonas/dk-home (Contents: read-only)
+
+# (server) the clone (step 10, first command)
+sudo git clone -c credential.helper='store --file=/etc/dk-srv/git-credentials' https://github.com/DimiJonas/dk-srv /opt/dk-srv
+
+# (server) see what the move would do, then do it: settings, memory and logs to dk-srv's places,
+# then dk-srv's install.sh (the commands storybook-notify, -security-check, … become dk-*; cron,
+# log rotation, PAM line and fail2ban are renamed). No question about the ntfy topic: it's moved.
+sudo /opt/dk-srv/migrate/from-storybook.sh --dry-run
+sudo /opt/dk-srv/migrate/from-storybook.sh
+
+# (server) the token's expiry date: GIT_TOKEN_EXPIRES=YYYY-MM-DD
+sudo nano /etc/dk-srv/dk-srv.conf
+
+# (server) the storybook's root parts from their root-owned copy (registers it in apps.d – the
+# hardening reads that). Shows what it will install and asks.
+sudo dk-app-update storybook https://github.com/DimiJonas/storybook
+
+# (server) the hardening parts again: they put their files under the new names and remove the old
+# ones (nothing else changes – the dry run shows exactly that)
+sudo /opt/dk-srv/hardening/install-hardening.sh --dry-run all
+sudo /opt/dk-srv/hardening/install-hardening.sh packages ssh kernel accounts logging firewall postgres
+sudo /opt/dk-srv/hardening/install-hardening.sh pam
+sudo /opt/dk-srv/hardening/install-hardening.sh auditd aide
+
+# (server) the static site: REPO=https://github.com/DimiJonas/dk-home in its sites.d file, then
+# its files, then nginx (which also renames its settings file and removes the old picture config)
+sudo nano /etc/dk-srv/sites.d/<name>.conf      (<name>: ls /etc/dk-srv/sites.d/)
+sudo dk-site-update <name>
+sudo /opt/dk-srv/nginx/install-nginx.sh
+
+# (server) nothing of the old names left (prints nothing, or only files you know)
+ls /usr/local/sbin | grep storybook | grep -v '^storybook-mode$'
+ls /etc/cron.d /etc/fail2ban/jail.d /etc/sysctl.d /etc/ssh/sshd_config.d | grep storybook
+
+# (server) restart, then the checks of step 13 (after "sudo reboot") and the audits of step 14
+sudo reboot

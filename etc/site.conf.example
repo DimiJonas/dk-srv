@@ -1,0 +1,11 @@
+# A static website on this server: /etc/dk-srv/sites.d/<NAME>.conf – read, never run.
+# Its files: sudo dk-site-update <NAME> (from REPO); nginx: sudo /opt/dk-srv/nginx/install-nginx.sh
+NAME=example.org
+# other names, only redirected to https://NAME (they must be in the certificate too)
+ALIASES="www.example.org"
+# the certificate's folder in /etc/letsencrypt/live/ (sudo certbot certificates)
+CERT_NAME=example.org
+# where the files come from (https only; a private repository needs the read token)
+REPO=https://github.com/you/your-site
+# the folder in the repository that holds the site (index.html, style.css, pictures …)
+SUBDIR=site

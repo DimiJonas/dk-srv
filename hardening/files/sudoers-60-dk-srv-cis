@@ -1,0 +1,6 @@
+# Installed by dk-srv hardening/install-hardening.sh (part "accounts") as
+# /etc/sudoers.d/60-dk-srv-cis (mode 440). CIS Ubuntu 24.04 Level 1,
+# every sudo command is written to its own log, and sudo asks for the password again after
+# 15 minutes.
+Defaults logfile="/var/log/sudo.log"
+Defaults timestamp_timeout=15

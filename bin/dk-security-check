@@ -1,0 +1,329 @@
+#!/bin/bash
+# The server's security check – every night at 05:10 (cron, as root), or by hand:
+#
+#   sudo dk-security-check            shows each step and a summary at the end
+#   sudo dk-security-check --quiet    nothing on the screen (the nightly run)
+#   sudo dk-security-check --accept   only remembers the problems found now as false alarms (see
+#                                     below) – no other checks
+# Every run writes its steps to /var/log/dk-srv/security-check.log. The apps it looks after are the
+# ones in /etc/dk-srv/apps.d/ (their npm folders, Node.js, their processes, their mode command).
+#
+#   What                                       Found by              high          critical
+#   nginx/OpenSSL – no fix available yet       pro cves --unfixable  LOCKDOWN      LOCKDOWN
+#   nginx/OpenSSL – fix available              apt                   installed right away, nginx restarted
+#   an app's libraries (npm, --omit=dev)       npm audit             notification  the app's MAINTENANCE MODE
+#   Node.js (security releases, if an app      nodejs.org            update installed, the apps restarted
+#   uses it: NODE=yes)
+#   OpenSSH                                    pro cves              urgent notification
+#   everything else in Ubuntu                  pro cves              notification (new ones only)
+#   security fixes not installed for 3 days    pro cves --fixable    notification
+#   files replaced by an update but still in use (an app's Node, nginx's OpenSSL) -> restarted
+#
+# With MODE=trial in /etc/dk-srv/dk-srv.conf (the start) it only sends "Would switch on …" instead
+# of switching maintenance mode/lockdown on; with MODE=auto it does it (dk-mode lockdown, or the
+# app's own mode command for its maintenance mode).
+# Updates are installed in both modes (Ubuntu's automatic updates would do the same an hour later).
+# Each problem is reported once, not every night. Problems accepted as false alarms (--accept, or
+# `dk-mode normal --force`, an app's `… normal --force`) don't switch anything on again; new
+# problems still do.
+set -u
+# shellcheck source=security-lib.sh
+. "${DK_LIB:-/usr/local/lib/dk-srv}/security-lib.sh"
+: "${DK_MODE_BIN:=/usr/local/sbin/dk-mode}"
+: "${PROC_DIR:=/proc}"
+: "${NODE_INDEX_URL:=https://nodejs.org/dist/index.json}"
+: "${NGINX_PID_FILE:=/run/nginx.pid}"
+: "${FIXABLE_WAIT_DAYS:=3}"
+: "${LOG_FILE:=$DK_LOG_DIR/security-check.log}"
+
+quiet=no
+case "${1:-}" in
+  --quiet) quiet=yes ;;
+  --accept) need_root; accept_current; exit 0 ;;
+  "") ;;
+  *) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 2 ;;
+esac
+
+need_root
+mkdir -p "$DK_STATE" "$(dirname "$LOG_FILE")"
+exec 9> "$DK_STATE/check.lock"
+if ! flock -n 9; then echo "Another security check is running right now." >&2; exit 0; fi
+
+# Output: `say` for people on the screen; `log` (also used by notify) for the log file
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG_FILE"; }
+say() { [ "$quiet" = yes ] || printf '%s\n' "$*"; }
+total_steps=8 step_no=0
+step() { step_no=$((step_no + 1)); say ""; say "[$step_no/$total_steps] $*"; log "[$step_no/$total_steps] $*"; }
+info() { say "      $*"; log "      $*"; }
+found=()    # findings for the summary
+sent=()     # notifications sent
+finding() { found+=("$1"); say "   -> $1"; log "   -> $1"; }
+send() {  # send "Title" "Message" [priority] [tags]
+  notify "$@"
+  sent+=("$1")
+  say "      notification sent: $1"
+}
+
+today=$(date +%F)
+mode_now=$(server_mode)
+app_modes() { local a out=""; for a in $(apps); do out+="$a: $(app_mode "$a"), "; done; printf '%s' "${out%, }"; }
+say "Security check – server: $mode_now; apps: $(app_modes); check mode: $MODE ($([ "$MODE" = auto ] && echo 'switches on by itself' || echo 'trial: only notifies'))"
+log "=== security check started (MODE=$MODE, server: $mode_now, $(app_modes))"
+
+accepted() { [ -f "$DK_STATE/accepted" ] && grep -qxF "$1" "$DK_STATE/accepted"; }
+first_time() { already_reported "$1" && return 1; mark_reported "$1"; }  # true once per key
+
+# switch_on lockdown|"maintenance APP" "reason" "key" – or, in trial mode, say that it would
+switch_on() {
+  local what=$1 why=$2 key=$3 app="" cmd by_hand
+  if [ "$what" = lockdown ]; then by_hand="sudo dk-mode lockdown"
+  else
+    app=${what#maintenance }; what="maintenance mode of $app"
+    cmd=$(app_mode_cmd "$app") || { finding "$app has no usable MODE_CMD – can't switch its maintenance mode on: $why"; return; }
+    by_hand="sudo $cmd maintenance"
+  fi
+  if [ "$MODE" = auto ]; then
+    finding "switching on $what: $why"
+    if [ -z "$app" ]; then "$DK_MODE_BIN" lockdown --reason "$why (nightly security check)" > /dev/null; sent+=("LOCKDOWN ON")
+    else "$cmd" maintenance --reason "$why (nightly security check)" > /dev/null; sent+=("Maintenance mode ON ($app)"); fi
+    mode_now=$(server_mode)
+  else
+    finding "would switch on $what (trial mode): $why"
+    if first_time "trial $key"; then
+      send "Would switch on $what (trial)" "$why. In trial mode nothing was switched. By hand: $by_hand – or, if it doesn't matter here: sudo dk-security-check --accept" \
+        "$([ -z "$app" ] && echo urgent || echo high)" warning
+    fi
+  fi
+}
+
+# --- 1. package lists ---------------------------------------------------------------------------
+step "Updating the package lists (apt-get update)"
+if apt-get update -qq >/dev/null 2>&1; then info "ok"; else finding "apt-get update failed – the update checks below may be out of date"; fi
+
+# --- 2. nginx/OpenSSL updates: install now ------------------------------------------------------
+step "Updates for nginx/OpenSSL (installed right away)"
+upgradable=$(facing_upgradable | tr '\n' ' ')
+upgradable=${upgradable% }
+if [ -z "$upgradable" ]; then
+  info "none waiting"
+else
+  info "waiting: $upgradable – installing"
+  # shellcheck disable=SC2086 # several package names
+  if DEBIAN_FRONTEND=noninteractive apt-get install -y -q --only-upgrade \
+       -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold $upgradable >/dev/null 2>&1; then
+    restarted=""
+    if [ "$mode_now" != lockdown ] && nginx -t >/dev/null 2>&1 && systemctl restart nginx; then restarted=" and nginx restarted"; fi
+    finding "installed: $upgradable$restarted"
+    send "nginx/OpenSSL updated" "Installed: $upgradable$restarted." default package
+  else
+    finding "installing $upgradable failed"
+    send "nginx/OpenSSL update failed" "Couldn't install: $upgradable. Log in and run: sudo apt update && sudo apt upgrade" high warning
+  fi
+fi
+
+# --- 3. Ubuntu's known problems without a fix ---------------------------------------------------
+step "Ubuntu's known problems without a fix (pro cves – can take a minute)"
+declare -A cve=()
+if list=$(pro_cves --unfixable); then
+  while IFS='=' read -r key value; do cve[$key]=$value; done < <(printf '%s\n' "$list" | python3 -I "$CVES_PY" unfixable "$DK_STATE")
+  info "${cve[ROWS]} entries = ${cve[UNIQUE]} different problems (a problem is listed once per package it affects)"
+  info "by priority: ${cve[BY_PRIORITY]:-none}"
+  [ -n "${cve[SEVERE_TOP]}" ] && info "most high/critical ones in: ${cve[SEVERE_TOP]}"
+  kernels=$(printf '%s' "${cve[KERNEL_VERSIONS]}" | tr ',' '\n' | grep -c . || true)
+  if [ "$kernels" -gt 1 ]; then
+    info "kernel packages of $kernels kernel versions are installed (running: $(uname -r)) – each brings its own list;"
+    info "old ones can usually be removed with: sudo apt autoremove --purge"
+  fi
+
+  if [ -n "${cve[LOCKDOWN]}" ]; then
+    if [ "$mode_now" = lockdown ]; then
+      finding "nginx/OpenSSL still without a fix (lockdown stays): ${cve[LOCKDOWN]}"
+    else
+      switch_on lockdown "Severe hole without a fix in nginx/OpenSSL: ${cve[LOCKDOWN]}" "lockdown ${cve[LOCKDOWN]}"
+    fi
+  else
+    info "nginx/OpenSSL: no high/critical problem without a fix"
+  fi
+  if [ -n "${cve[SSH_NEW]}" ]; then
+    finding "OpenSSH: ${cve[SSH_NEW]}"
+    send "OpenSSH: severe hole without a fix" "${cve[SSH_NEW]}. SSH stays open (closing it would lock you out). Check https://ubuntu.com/security/cves and the hoster's firewall options." urgent rotating_light
+  fi
+  if [ -n "${cve[UNRATED_NEW]}" ]; then
+    finding "nginx/OpenSSL, not rated by Ubuntu yet: ${cve[UNRATED_NEW]}"
+    send "nginx/OpenSSL: new problem, not rated yet" "${cve[UNRATED_NEW]}. Ubuntu hasn't rated it yet – nothing switched. Details: pro cve <CVE number>" high warning
+  fi
+  if [ "${cve[FIRST_RUN]}" = yes ]; then
+    finding "starting point: ${cve[BY_PRIORITY]:-none} – from now on only new high/critical ones are reported"
+    send "Known problems without a fix: starting point" "Ubuntu lists ${cve[UNIQUE]} problems without a fix for this server (${cve[BY_PRIORITY]:-none}); most high/critical ones in: ${cve[SEVERE_TOP]:-–}. Nothing to do – they're fixed by the automatic updates once Ubuntu has a fix. From now on only new high/critical ones are reported; the weekly report shows the totals." low clipboard
+  elif [ "${cve[OTHER_NEW_COUNT]}" -gt 0 ]; then
+    finding "${cve[OTHER_NEW_COUNT]} new high/critical problem(s) without a fix in other packages (by package: ${cve[OTHER_NEW_BY_PACKAGE]:-–}): ${cve[OTHER_NEW]}"
+    send "New severe problems without a fix (${cve[OTHER_NEW_COUNT]})" "By package: ${cve[OTHER_NEW_BY_PACKAGE]:-–} (a newly installed package brings all its known problems at once). ${cve[OTHER_NEW]}. Not internet-facing as far as known – nothing switched; fixed by the automatic updates once Ubuntu has a fix. Details: pro cve <CVE number>" default warning
+  else
+    info "other packages: no new high/critical ones since the last run"
+  fi
+else
+  finding "pro cves didn't work – Ubuntu's known problems weren't checked"
+  first_time "pro-failed $today" && send "Security check incomplete" "pro cves didn't work, so Ubuntu's known problems weren't checked. Run it by hand: pro cves --unfixable" high warning
+fi
+
+# --- 4. security fixes that stay uninstalled (automatic updates stuck?) -------------------------
+step "Security fixes not installed for $FIXABLE_WAIT_DAYS+ days (pro cves --fixable)"
+declare -A fix=()
+if list=$(pro_cves --fixable); then
+  while IFS='=' read -r key value; do fix[$key]=$value; done < <(printf '%s\n' "$list" | python3 -I "$CVES_PY" fixable "$DK_STATE" "$FIXABLE_WAIT_DAYS")
+  info "high/critical with a fix waiting to be installed: ${fix[FIXABLE]} (the automatic updates install them daily)"
+  if [ "${fix[WAITING_COUNT]}" -gt 0 ]; then
+    finding "waiting for $FIXABLE_WAIT_DAYS+ days: ${fix[WAITING]}"
+    send "Security updates not installed" "Waiting for $FIXABLE_WAIT_DAYS+ days: ${fix[WAITING]}. The automatic updates may be stuck – run: sudo apt update && sudo apt upgrade" high warning
+  fi
+else
+  info "pro cves --fixable didn't work – skipped"
+fi
+
+# --- 5. npm libraries of the apps (only what runs: --omit=dev) -------------------------------------
+step "Libraries of the apps (npm audit --omit=dev)"
+npm_summary=""
+for app in $(apps); do
+  for dir in $(app_get "$app" NPM_DIRS); do
+    [[ $dir =~ ^[A-Za-z0-9._-]+$ ]] || continue
+    if ! result=$(npm_audit "$app" "$dir"); then
+      finding "$app/$dir: npm audit didn't answer (no connection to the npm registry?)"
+      first_time "npm-failed $app/$dir $today" && send "Security check incomplete" "npm audit in $app/$dir didn't answer (no connection to the npm registry?)." default warning
+      continue
+    fi
+    read -r critical high moderate low critical_names high_names <<< "$result"
+    echo "$critical $high $moderate $low" > "$DK_STATE/npm-$app-$dir"
+    info "$app/$dir: $critical critical, $high high, $moderate moderate, $low low"
+    npm_summary+="$app/$dir $critical critical/$high high; "
+    if [ "$critical" -gt 0 ] && ! accepted "npm $app/$dir $critical_names"; then
+      if [ "$mode_now" = normal ] && [ "$(app_mode "$app")" = normal ]; then
+        switch_on "maintenance $app" "Critical problem in $app's $dir libraries: $critical_names (npm audit)" "npm $app/$dir $critical_names"
+      else
+        finding "$app/$dir: critical ($critical_names) – $app is already in maintenance mode or the server in lockdown"
+      fi
+    fi
+    if [ "$high" -gt 0 ] && first_time "npm-high $app/$dir $high_names"; then
+      finding "$app/$dir: high-rated problem in $high_names"
+      send "npm: high-rated problem in $app/$dir" "$high_names. Update the libraries (on the laptop), test and deploy." default warning
+    fi
+  done
+done
+[ -n "$npm_summary" ] || info "no app with npm folders (NPM_DIRS in $APPS_DIR/)"
+
+# --- 6. Node.js security releases ---------------------------------------------------------------
+step "Node.js security releases (nodejs.org)"
+installed=$(node -v 2>/dev/null)
+node_summary="?"
+node_apps=$(for a in $(apps); do [ "$(app_get "$a" NODE)" = yes ] && echo "$a"; done | paste -sd' ')
+if [ -z "$node_apps" ]; then
+  info "no app uses Node.js (NODE=yes) – skipped"; node_summary="not used"
+elif [ -z "$installed" ]; then
+  info "node isn't installed?"
+else
+  needed=$(curl -fsS --max-time 20 "$NODE_INDEX_URL" 2>/dev/null | python3 -c '
+import json, sys
+v = lambda s: tuple(int(x) for x in s.lstrip("v").split("."))
+installed = v(sys.argv[1])
+try:
+    releases = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+newer = [r["version"] for r in releases if r.get("security") and v(r["version"]) > installed
+         and v(r["version"])[0] == installed[0]]
+print(max(newer, key=v, default=""))
+' "$installed") || { info "the release list couldn't be read – skipped"; needed=""; }
+  if [ -z "$needed" ]; then
+    info "$installed installed – no newer security release for Node ${installed%%.*}"
+    node_summary="$installed, up to date"
+  else
+    info "security release $needed is out (installed: $installed) – installing from NodeSource"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q --only-upgrade nodejs >/dev/null 2>&1
+    now=$(node -v 2>/dev/null)
+    if [ "$now" != "$installed" ]; then
+      finding "Node.js updated: $installed -> $now (the apps are restarted in the next step)"
+      node_summary="updated to $now"
+    else
+      finding "Node.js security release $needed isn't available from NodeSource yet"
+      node_summary="$installed, security release $needed not available yet"
+      first_time "node-waiting $needed" && send "Node.js security release waiting" "Node $needed fixes security problems; NodeSource doesn't offer it yet (installed: $installed). Checked again every night." high warning
+    fi
+  fi
+fi
+
+# --- 7. programs still using replaced files (after updates) -------------------------------------
+step "Programs still running replaced files (after updates)"
+restarts=0
+if [ "$mode_now" = normal ]; then
+  for app in $(apps); do
+    proc=$(app_get "$app" PM2_PROCESS); user=$(app_get "$app" APP_USER)
+    [ -n "$proc" ] && [ -n "$user" ] && [ "$(app_mode "$app")" = normal ] || continue
+    pid=$(as_user "$user" pm2 pid "$proc" 2>/dev/null | tail -1)
+    if [ -n "$pid" ] && [ "$pid" != 0 ] && readlink "$PROC_DIR/$pid/exe" 2>/dev/null | grep -q '(deleted)'; then
+      if as_user "$user" pm2 restart "$proc" >/dev/null 2>&1; then
+        restarts=$((restarts + 1))
+        finding "$app restarted (it still ran the old Node.js)"
+        send "$app restarted" "Node.js was updated; $app now runs $(node -v 2>/dev/null)." low arrows_counterclockwise
+      fi
+    fi
+  done
+fi
+if [ "$mode_now" != lockdown ] && [ -r "$NGINX_PID_FILE" ]; then
+  pid=$(cat "$NGINX_PID_FILE")
+  if grep -qE '(libssl|libcrypto|nginx).*\(deleted\)' "$PROC_DIR/$pid/maps" 2>/dev/null; then
+    if nginx -t >/dev/null 2>&1 && systemctl restart nginx; then
+      restarts=$((restarts + 1))
+      finding "nginx restarted (it still used the old OpenSSL/nginx)"
+      send "nginx restarted" "OpenSSL or nginx were updated; nginx now uses the new version." low arrows_counterclockwise
+    fi
+  fi
+fi
+[ "$restarts" = 0 ] && info "none"
+
+# --- 8. the hardening (step 15) still in place? ---------------------------------------------------
+step "Hardening still in place (hardening/install-hardening.sh)"
+if [ ! -s "$DK_STATE/hardening-parts" ]; then
+  info "not installed yet (sudo /opt/dk-srv/hardening/install-hardening.sh)"
+else
+  drift=$(hardening_drift)
+  if [ -z "$drift" ]; then
+    info "all as installed ($(paste -sd' ' "$DK_STATE/hardening-parts"))"
+  else
+    new_drift=""
+    while IFS= read -r d; do
+      finding "changed: $d"
+      first_time "drift $d" && new_drift+="- $d"$'\n'
+    done <<< "$drift"
+    [ -n "$new_drift" ] && send "Hardening changed" "No longer as installed:
+${new_drift}An update may have undone it – or someone else. To put it back: sudo /opt/dk-srv/hardening/install-hardening.sh <part>" high warning
+  fi
+  # forget drift that's gone, so it's reported again if it comes back
+  if [ -f "$DK_STATE/reported" ]; then
+    { grep -v '^drift ' "$DK_STATE/reported"
+      grep '^drift ' "$DK_STATE/reported" | while IFS= read -r k; do
+        printf '%s\n' "$drift" | grep -qxF -- "${k#drift }" && printf '%s\n' "$k"
+      done; } > "$DK_STATE/reported.new" || true
+    mv "$DK_STATE/reported.new" "$DK_STATE/reported"
+  fi
+fi
+
+# --- summary -------------------------------------------------------------------------------------
+mode_now=$(server_mode)
+short="${#found[@]} finding(s), ${#sent[@]} notification(s); server: $mode_now; $(app_modes)"
+printf '%s – %s\n' "$(date '+%F %T')" "$short" > "$DK_STATE/last-check"
+log "=== done: $short"
+say ""
+say "Summary"
+say "  Server: $mode_now · apps: $(app_modes) · check mode: $MODE"
+if [ "${#cve[@]}" -gt 0 ]; then
+  say "  Ubuntu: ${cve[UNIQUE]} known problems without a fix (${cve[BY_PRIORITY]:-none}) – nginx/OpenSSL: $([ -n "${cve[LOCKDOWN]}" ] && echo "SEVERE: ${cve[LOCKDOWN]}" || echo 'nothing severe')"
+fi
+say "  npm: ${npm_summary%; }"
+say "  Node.js: $node_summary"
+if [ ${#found[@]} -eq 0 ]; then
+  say "  Nothing that needs you."
+else
+  say "  Findings:"
+  for f in "${found[@]}"; do say "   - $f"; done
+fi
+if [ ${#sent[@]} -gt 0 ]; then say "  Notifications sent: $(printf '%s, ' "${sent[@]}" | sed 's/, $//')"; fi
+say "  Log: $LOG_FILE"
