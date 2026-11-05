@@ -72,8 +72,10 @@ app-update,site-update}`, `lib/` (shared functions, nginx planning with undo), `
 server-wide part), `hardening/` (moved, renamed), `fail2ban/`, `migrate/from-storybook.sh`, the
 documents ([HARDENING.md](HARDENING.md), [SECURITY.md](SECURITY.md), the command files).
 
-**Measured after the move:** to do – both audits once more (the tailoring file is now
-`/etc/dk-srv/usg-tailoring.xml`); nothing about the settings changed, only names and places.
+**Measured after the move** (2026-11-05, 23:50 and 23:52; the tailoring file is now
+`/etc/dk-srv/usg-tailoring.xml`): all rules **92.7 %** (344 pass, 13 fail – exactly the 13 accepted
+risks), with the accepted risks switched off **100 %** (344 pass, 0 fail). Nothing about the
+settings changed, only names and places.
 
 ---
 

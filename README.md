@@ -8,7 +8,7 @@ mechanism so that each one can be understood, checked and undone.
 | Measurement (CIS Ubuntu 24.04 Level 1 Server, Ubuntu Pro's USG) | Score |
 |---|---|
 | Before the hardening | **72.2 %** |
-| After, all rules | **92.4 %** |
+| After, all rules | **92.7 %** |
 | After, without the 13 risks accepted on purpose (each with its reason) | **100 %** |
 
 - **[`SECURITY.md`](SECURITY.md)** – the scorecard: every CIS area for Ubuntu, nginx and

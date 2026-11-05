@@ -27,14 +27,17 @@ How each mechanism works, where it lives and how to check it yourself:
 | After the follow-up, all rules (2026-11-05) | **92.4 %** | 343 pass · 14 fail · 50 not applicable |
 | After the follow-up, with the accepted risks switched off (13 rules, A12 and A13 added) (2026-11-05) | **99.6 %** | 343 pass · 1 fail · 50 not applicable |
 | After the sysstat fix, with the accepted risks switched off (2026-11-05, 15:06) | **100 %** | 344 pass · 0 fail |
+| After the move to dk-srv, all rules (2026-11-05, 23:50) | **92.7 %** | 344 pass · 13 fail · 50 not applicable |
+| After the move to dk-srv, with the accepted risks switched off (2026-11-05, 23:52) | **100 %** | 344 pass · 0 fail · 50 not applicable |
 
 The 14 failures of all rules on 2026-11-05 were the 13 accepted risks plus
 `permissions_local_var_log`: sysstat (the performance history for `sar`) wrote a new file into
 `/var/log/sysstat/` every day, readable for everyone – the one-time fix of the log rights didn't
 last. Fixed the same day with sysstat's own setting `UMASK=0027` (and the nightly check now reports
-log files more open than 640): the tailored audit afterwards passed every rule. (These measurements
-were made with the scripts' earlier home in the storybook repository; the move to dk-srv renamed
-files but changed no setting – the next audit confirms it.)
+log files more open than 640): the tailored audit afterwards passed every rule. These measurements
+were made with the scripts' earlier home in the storybook repository. After the move to dk-srv
+(renamed files, no changed setting) both audits were run again: the same 344 rules pass, and the
+13 failures of all rules are exactly the 13 accepted risks below.
 
 The 24 failures of 2026-11-03 and what the follow-up did about them (details in
 [`HARDENING.md`](HARDENING.md), "Lessons"):

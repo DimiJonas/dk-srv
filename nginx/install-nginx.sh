@@ -58,7 +58,7 @@ plan_link default-deny
 plan_unlink default
 
 # --- only TLS 1.2 and 1.3, also for sites that don't set it themselves
-if grep -qE '^[[:space:]]*ssl_protocols[^;]*TLSv1(\.1)?[[:space:];]' "$NGINX_DIR/nginx.conf" 2>/dev/null; then
+if grep -qE '^[[:space:]]*ssl_protocols[^;]*TLSv1(\.1)?[[:space:];]|# storybook: no TLS' "$NGINX_DIR/nginx.conf" 2>/dev/null; then   # (or only our older note)
   sed -E 's/^([[:space:]]*)ssl_protocols[^;]*;.*/\1ssl_protocols TLSv1.2 TLSv1.3; # dk-srv: no TLS 1.0\/1.1 (CIS NGINX)/' "$NGINX_DIR/nginx.conf" > "$work/nginx.conf"
   plan_file "$NGINX_DIR/nginx.conf" "$work/nginx.conf"
 fi

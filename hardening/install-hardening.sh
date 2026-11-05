@@ -104,6 +104,18 @@ set_block() {
 # installed in the same part)
 retire() { local p; for p in "$@"; do [ -e "$p" ] || [ -L "$p" ] || continue
   say "removing $p (old name – now ${p//storybook/dk-srv})"; [ "$dry" = yes ] || { backup "$p"; rm -f "$p"; changed_paths+=("$p"); }; done; }
+# rename_notes FILE… – the notes our earlier versions left in other packages' files (lines we
+# commented out or added) still named the storybook's files; they get dk-srv's names. Only the
+# note changes, never a setting.
+OLD_NOTES=(
+  's|# storybook: commented out – /etc/sysctl.d/60-storybook-cis.conf sets it (CIS, ops/hardening)|# dk-srv: commented out – /etc/sysctl.d/60-dk-srv-cis.conf sets it (CIS, dk-srv hardening)|'
+  's|# storybook (CIS 5.3.3.4)|# dk-srv (CIS 5.3.3.4)|'
+)
+rename_notes() { local f e; for f in "$@"; do [ -f "$f" ] || continue
+  grep -qE '# storybook(:| \(CIS)' "$f" || continue
+  say "notes in $f: storybook's names -> dk-srv's (only comments)"
+  [ "$dry" = yes ] && continue
+  backup "$f"; for e in "${OLD_NOTES[@]}"; do sed -i "$e" "$f"; done; changed_paths+=("$f"); done; }
 # chmod_to MODE PATH… / chown_to OWNER PATH… – only when different
 chmod_to() { local m=$1; shift; for p in "$@"; do [ -e "$p" ] || continue
   if [ "$(stat -c '%a' "$p")" != "${m#0}" ]; then say "rights $(stat -c '%a' "$p") -> $m: $p"; [ "$dry" = yes ] || { backup "$p"; chmod "$m" "$p"; changed_paths+=("$p"); }; fi; done; }
@@ -240,6 +252,8 @@ part_kernel() {
   # /etc/ufw/sysctl.conf at every start and reload (log_martians=0 – that undid ours after every
   # restart), procps ships rp_filter=2, and the CIS audit checks every file: all must agree.
   sysctl_contradictions "$t"
+  # shellcheck disable=SC2086
+  rename_notes $SYSCTL_FILES_GLOB
   rm -f "$t"
   if [ "$dry" = no ]; then
     sysctl --system > /dev/null
@@ -368,6 +382,7 @@ part_accounts() {
 
   step "accounts: su only for root, sudo log"
   getent group sugroup > /dev/null || { say "new empty group sugroup (nobody may use su)"; act groupadd sugroup; note_changed /etc/group /etc/group- /etc/gshadow /etc/gshadow-; }
+  rename_notes /etc/pam.d/su
   if grep -qE '^[[:space:]]*auth[[:space:]]+required[[:space:]]+pam_wheel\.so.*group=sugroup' /etc/pam.d/su; then say "unchanged: /etc/pam.d/su"
   else
     say "/etc/pam.d/su: only members of sugroup (nobody) may use su – sudo is the way"
