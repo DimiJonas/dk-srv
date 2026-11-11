@@ -29,6 +29,8 @@ How each mechanism works, where it lives and how to check it yourself:
 | After the sysstat fix, with the accepted risks switched off (2026-11-05, 15:06) | **100 %** | 344 pass · 0 fail |
 | After the move to dk-srv, all rules (2026-11-05, 23:50) | **92.7 %** | 344 pass · 13 fail · 50 not applicable |
 | After the move to dk-srv, with the accepted risks switched off (2026-11-05, 23:52) | **100 %** | 344 pass · 0 fail · 50 not applicable |
+| After the storybook's own user, all rules (2026-11-11, 12:51) | **92.7 %** | 343 pass · 14 fail · 50 not applicable |
+| After the storybook's own user, with the accepted risks switched off (2026-11-11, 12:58) | **100 %** | 343 pass · 1 fail · 50 not applicable |
 
 The 14 failures of all rules on 2026-11-05 were the 13 accepted risks plus
 `permissions_local_var_log`: sysstat (the performance history for `sar`) wrote a new file into

@@ -540,3 +540,6 @@ risks; with lesson 12 fixed, **100 %** without the accepted risks. What was behi
     (`status=200/CHDIR` in `systemctl status`). Fixed with a group instead of opening it to
     everyone: the folders belong to the app's group with the setgid bit, so files created later
     inherit it. The sandbox test had umask 022 and missed it – test with the server's defaults.
+    And while it failed, systemd restarted it every 3 seconds without end: its default start limit
+    (5 starts in 10 seconds) is never reached with 3 seconds between the tries. Every try built
+    the whole sandbox again, on a small shared CPU. Now: at most 5 starts a minute, then "failed".
