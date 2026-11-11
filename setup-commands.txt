@@ -38,6 +38,14 @@ ssh-copy-id root@SERVER
 # (laptop) log in as root
 ssh root@SERVER
 
+# (laptop) later, for appuser (step 4): a short name for the login that offers ONLY this key.
+# Without "IdentitiesOnly", ssh first offers every key your laptop's SSH agent holds (Ubuntu's
+# desktop loads all keys in ~/.ssh) – the server then may take a restricted key (e.g. the
+# storybook's backup key: you'd land in its read-only backup copy, paths below the backup folder),
+# or count each wrong key as a failed login (4 per connection, then fail2ban bans you for 10 min).
+printf 'Host dk\n    HostName SERVER\n    User appuser\n    IdentityFile ~/.ssh/id_ed25519\n    IdentitiesOnly yes\n' >> ~/.ssh/config
+# from then on: ssh dk  ·  scp dk:file .  ·  rsync -a dk:folder/ .
+
 
 # =================================================================================================
 # 2. Bring the system up to date

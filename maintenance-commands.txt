@@ -160,6 +160,12 @@ sudo fail2ban-client status dk-scanners
 # (server) unban an IP address (e.g. your own): dk-scanners, nginx-limit-req or sshd
 sudo fail2ban-client set dk-scanners unbanip 1.2.3.4
 
+# Banned from SSH yourself (too many failed logins – e.g. ssh offered several wrong keys, 4 per
+# connection)? Ubuntu's "sshd" jail bans for 10 minutes: wait, or log in through the hoster's web
+# console and unban your address (your IP: e.g. https://ifconfig.me on the laptop)
+sudo fail2ban-client status sshd
+sudo fail2ban-client set sshd unbanip 1.2.3.4
+
 
 # =================================================================================================
 # The read token for private repositories (setup-commands.txt, step 9)
@@ -259,8 +265,9 @@ sudo python3 /opt/dk-srv/hardening/make-tailoring.py /tmp/usg-tailoring.xml /etc
 # (server) the facts for a review (read-only, anonymised): ~/dk-srv-facts-<date>.txt
 sudo /opt/dk-srv/hardening/collect-facts.sh
 
-# (laptop) copy them over (SERVER = the server's address)
-scp appuser@SERVER:dk-srv-facts-*.txt .
+# (laptop) copy them over – with the login alias "dk" (setup-commands.txt, step 1: it offers only
+# your login key; otherwise the backup key may answer and the path lands in the backup folder)
+scp 'dk:dk-srv-facts-*.txt' 'dk:usg-*.html' .
 
 
 # =================================================================================================

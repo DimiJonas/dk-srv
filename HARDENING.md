@@ -534,3 +534,9 @@ risks; with lesson 12 fixed, **100 %** without the accepted risks. What was behi
     that. Its own user, without a shell and in a sandbox, turns "the server" into "the photos and
     the app's database" – and `systemd-analyze security` makes the difference measurable
     (9.0 → 1.4).
+17. **A safer default meets a new user.** The admin user's umask 027 (lesson 5 again) made the
+    storybook's fresh clone `750`/`640` – and its new service user, being "others", couldn't even
+    enter the folder: the service failed before its first line of code, with an empty log
+    (`status=200/CHDIR` in `systemctl status`). Fixed with a group instead of opening it to
+    everyone: the folders belong to the app's group with the setgid bit, so files created later
+    inherit it. The sandbox test had umask 022 and missed it – test with the server's defaults.

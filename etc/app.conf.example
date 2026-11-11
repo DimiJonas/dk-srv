@@ -8,7 +8,8 @@
 APP_USER=myapp
 SERVICE=myapp.service
 # its code (a git clone) and who owns it: the admin user pulls, installs and builds; the app only
-# reads it (npm audit runs as DEPLOY_USER)
+# reads it, through its group (setgid folders – the admin's umask 027 leaves "others" nothing);
+# npm audit runs as DEPLOY_USER
 RUNTIME_DIR=/srv/myapp
 DEPLOY_USER=appuser
 # whether it uses Node.js (the nightly check then also watches Node.js' security releases)
