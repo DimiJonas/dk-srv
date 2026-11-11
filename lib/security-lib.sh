@@ -48,7 +48,7 @@ need_root() {
   fi
 }
 
-# as_user USER COMMAND… – runs a command as another user (pm2 and npm belong to the app's user)
+# as_user USER COMMAND… – runs a command as another user (npm belongs to the code's owner)
 as_user() {
   local user=$1; shift
   if [ -n "$DK_TEST" ]; then "$@"; return; fi
@@ -60,7 +60,7 @@ as_user() {
 http_code() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$1" 2>/dev/null || true; }
 
 # --- the apps (/etc/dk-srv/apps.d/<app>.conf, written by each app's ops/root/install.sh) -------
-# Keys (see etc/app.conf.example): APP_USER RUNTIME_DIR PM2_PROCESS SITE_URL LOGIN_PATH NPM_DIRS
+# Keys (see etc/app.conf.example): APP_USER SERVICE RUNTIME_DIR DEPLOY_USER SITE_URL LOGIN_PATH NPM_DIRS
 # NODE MODE_CMD NGINX_SITES AIDE_EXCLUDE AIDE_SENSITIVE BACKUP_LOG RESTORE_TEST_LOG DATABASES
 # DB_OWNER DB_NO_AUDIT
 apps() {
@@ -83,6 +83,24 @@ app_mode_cmd() {
     [ -x "$cmd" ] && [ "$(stat -c %u "$cmd")" = 0 ] && [ -z "$(find "$cmd" -perm /022 2>/dev/null)" ] || return 1
   fi
   echo "$cmd"
+}
+# app_service APP – the app's systemd service (SERVICE=…), only a plain unit name
+app_service() {
+  local svc; svc=$(app_get "$1" SERVICE)
+  [[ $svc =~ ^[A-Za-z0-9_.@-]+\.service$ ]] || return 1
+  echo "$svc"
+}
+# app_main_pid APP – the process ID of the app's running service (empty if it's not running)
+app_main_pid() {
+  local svc pid; svc=$(app_service "$1") || return 0
+  pid=$(systemctl show -p MainPID --value "$svc" 2>/dev/null)
+  [ -n "$pid" ] && [ "$pid" != 0 ] && echo "$pid"
+  return 0
+}
+# app_restart APP – restarts the app's service (if it's running; returns 1 if that fails)
+app_restart() {
+  local svc; svc=$(app_service "$1") || return 1
+  systemctl try-restart "$svc"
 }
 # app_mode APP – normal | maintenance | stopped | ? (asks the app's mode command)
 app_mode() {
@@ -143,7 +161,9 @@ facing_upgradable() {
 # plus the names of the affected packages; returns 1 if npm audit didn't answer
 npm_audit() {   # npm_audit APP DIR
   local app=$1 dir=$2 user root json
-  user=$(app_get "$app" APP_USER); root=$(app_get "$app" RUNTIME_DIR)
+  # as the code's owner (DEPLOY_USER; it installed the packages), not the app's service user
+  user=$(app_get "$app" DEPLOY_USER); [ -n "$user" ] || user=$(app_get "$app" APP_USER)
+  root=$(app_get "$app" RUNTIME_DIR)
   [ -n "$user" ] && [ -d "$root/$dir" ] || return 1
   json=$(cd "$root/$dir" && as_user "$user" npm audit --omit=dev --json 2>/dev/null) || true
   printf '%s' "$json" | python3 -c '
@@ -276,7 +296,25 @@ hardening_drift() {
     [ -L "$NGINX_DIR/sites-enabled/default-deny" ] || echo "nginx: default-deny is switched off"
   fi
   command -v aa-enabled > /dev/null && [ "$(aa-enabled 2>/dev/null)" != Yes ] && echo "AppArmor: not enabled"
+  app_drift
   return 0
+}
+
+# Every app's service still runs as the app's own user – not root, not the admin user – and that
+# user still can't log in or use sudo; the service's sandbox is still switched on. One line per problem.
+app_drift() {
+  local a svc user shell
+  for a in $(apps); do
+    svc=$(app_service "$a") || continue
+    user=$(app_get "$a" APP_USER)
+    [ "$(systemctl show -p User --value "$svc" 2>/dev/null)" = "$user" ] || echo "$a: $svc doesn't run as $user any more"
+    case "$user" in root|"$ADMIN_USER"|"") echo "$a: APP_USER is \"$user\" – the app must have its own user" ;; esac
+    shell=$(getent passwd "$user" | cut -d: -f7)
+    [[ $shell == */nologin || $shell == */false ]] || echo "$a: $user can log in (shell: ${shell:-none})"
+    id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -qxE 'sudo|admin|adm' && echo "$a: $user is in an admin group ($(id -nG "$user"))"
+    [ "$(systemctl show -p NoNewPrivileges --value "$svc" 2>/dev/null)" = yes ] && \
+      [ "$(systemctl show -p ProtectSystem --value "$svc" 2>/dev/null)" = strict ] || echo "$a: the sandbox of $svc is off (NoNewPrivileges/ProtectSystem)"
+  done
 }
 
 # cmdline_missing "PARAM …" "LINE" – the parameters that aren't words of LINE

@@ -26,8 +26,7 @@
 #
 # Every file is backed up before it changes (/var/backups/dk-srv-hardening/<date-time>/, same
 # path inside), and the changed paths are noted for the file integrity check. Run
-# `sudo /opt/dk-srv/install.sh` afterwards (it sets up the nightly checks). Files of the names
-# before dk-srv (…storybook…) are removed when their dk-srv counterpart is installed.
+# `sudo /opt/dk-srv/install.sh` afterwards (it sets up the nightly checks).
 set -euo pipefail
 # `… | put_text` and `… | set_block` must run in this shell, not in a subshell – otherwise what they
 # note in changed_paths (for update-grub, the AIDE rebuild and the file integrity check) is lost
@@ -92,30 +91,13 @@ put_text() { local t; t=$(mktemp); cat > "$t"; put "$t" "$@"; rm -f "$t"; }
 # set_block FILE NAME < content – a marked block at the end of a file (replaced on the next run)
 set_block() {
   local file=$1 name=$2 t; t=$(mktemp)
-  # (also removes the block of the name before dk-srv: "# >>> storybook <name>")
-  { [ -e "$file" ] && sed -e "/^# >>> storybook $name/,/^# <<< storybook $name/d" -e "/^# >>> dk-srv $name/,/^# <<< dk-srv $name/d" "$file"
+  { [ -e "$file" ] && sed -e "/^# >>> dk-srv $name/,/^# <<< dk-srv $name/d" "$file"
     echo "# >>> dk-srv $name (hardening/install-hardening.sh – don't edit inside)"
     cat
     echo "# <<< dk-srv $name"; } > "$t"
   put "$t" "$file" "$(stat -c '%a' "$file" 2>/dev/null || echo 644)" "$(stat -c '%U:%G' "$file" 2>/dev/null || echo root:root)"
   rm -f "$t"
 }
-# retire PATH… – a file of the name before dk-srv: backed up and removed (its dk-srv counterpart is
-# installed in the same part)
-retire() { local p; for p in "$@"; do [ -e "$p" ] || [ -L "$p" ] || continue
-  say "removing $p (old name – now ${p//storybook/dk-srv})"; [ "$dry" = yes ] || { backup "$p"; rm -f "$p"; changed_paths+=("$p"); }; done; }
-# rename_notes FILE… – the notes our earlier versions left in other packages' files (lines we
-# commented out or added) still named the storybook's files; they get dk-srv's names. Only the
-# note changes, never a setting.
-OLD_NOTES=(
-  's|# storybook: commented out – /etc/sysctl.d/60-storybook-cis.conf sets it (CIS, ops/hardening)|# dk-srv: commented out – /etc/sysctl.d/60-dk-srv-cis.conf sets it (CIS, dk-srv hardening)|'
-  's|# storybook (CIS 5.3.3.4)|# dk-srv (CIS 5.3.3.4)|'
-)
-rename_notes() { local f e; for f in "$@"; do [ -f "$f" ] || continue
-  grep -qE '# storybook(:| \(CIS)' "$f" || continue
-  say "notes in $f: storybook's names -> dk-srv's (only comments)"
-  [ "$dry" = yes ] && continue
-  backup "$f"; for e in "${OLD_NOTES[@]}"; do sed -i "$e" "$f"; done; changed_paths+=("$f"); done; }
 # chmod_to MODE PATH… / chown_to OWNER PATH… – only when different
 chmod_to() { local m=$1; shift; for p in "$@"; do [ -e "$p" ] || continue
   if [ "$(stat -c '%a' "$p")" != "${m#0}" ]; then say "rights $(stat -c '%a' "$p") -> $m: $p"; [ "$dry" = yes ] || { backup "$p"; chmod "$m" "$p"; changed_paths+=("$p"); }; fi; done; }
@@ -175,7 +157,6 @@ part_packages() {
   # package instead, security fixes included. This file makes dpkg keep our version without asking
   # and put the package's new one next to it as <file>.dpkg-dist (the weekly report lists those).
   put "$FILES/apt-60-dk-srv-keep-config" /etc/apt/apt.conf.d/60-dk-srv-keep-config 644
-  retire /etc/apt/apt.conf.d/60-storybook-keep-config
 }
 
 # A mail server: AIDE's packages recommend a mail program (bsd-mailx), and that pulled in postfix,
@@ -215,7 +196,6 @@ part_ssh() {
   step "ssh: SSH server settings"
   say "Keep this SSH session open until a NEW login has worked."
   render "$FILES/sshd-00-dk-srv.conf" | put_text /etc/ssh/sshd_config.d/00-dk-srv.conf 600
-  retire /etc/ssh/sshd_config.d/00-storybook.conf
   put "$FILES/issue.net" /etc/issue.net 644
   put "$FILES/issue.net" /etc/issue 644
   chmod_to 600 /etc/ssh/sshd_config
@@ -247,13 +227,10 @@ part_kernel() {
     sed 's/@ACCEPT_RA@//' "$FILES/sysctl-60-dk-srv-cis.conf" > "$t"
   fi
   put "$t" /etc/sysctl.d/60-dk-srv-cis.conf 644
-  retire /etc/sysctl.d/60-storybook-cis.conf
   # The same keys with another value in other files: commented out there. ufw applies its own
   # /etc/ufw/sysctl.conf at every start and reload (log_martians=0 – that undid ours after every
   # restart), procps ships rp_filter=2, and the CIS audit checks every file: all must agree.
   sysctl_contradictions "$t"
-  # shellcheck disable=SC2086
-  rename_notes $SYSCTL_FILES_GLOB
   rm -f "$t"
   if [ "$dry" = no ]; then
     sysctl --system > /dev/null
@@ -271,7 +248,6 @@ part_kernel() {
   put "$FILES/modprobe-dk-srv-cis.conf" /etc/modprobe.d/dk-srv-cis.conf 644
   put "$FILES/limits-60-dk-srv-cis.conf" /etc/security/limits.d/60-dk-srv-cis.conf 644
   put "$FILES/coredump-60-dk-srv-cis.conf" /etc/systemd/coredump.conf.d/60-dk-srv-cis.conf 644
-  retire /etc/modprobe.d/storybook-cis.conf /etc/security/limits.d/60-storybook-cis.conf /etc/systemd/coredump.conf.d/60-storybook-cis.conf
   # /dev/shm: nothing may be run from there; /tmp: its own space in memory (tmpfs), same options.
   # (A real /tmp partition, if there is one, stays as it is.)
   local fstab_t tmp_line="tmpfs /tmp tmpfs defaults,rw,nosuid,nodev,noexec,relatime,size=25%,mode=1777 0 0"
@@ -280,7 +256,7 @@ part_kernel() {
     tmp_line="# (/tmp has its own partition – left as it is)"
   fi
   grep -vE '^tmpfs[[:space:]]+/(dev/shm|tmp)[[:space:]]' /etc/fstab \
-    | grep -vE '^# (>>> (storybook|dk-srv) kernel|<<< (storybook|dk-srv) kernel)' > "$fstab_t" || true
+    | grep -vE '^# (>>> dk-srv kernel|<<< dk-srv kernel)' > "$fstab_t" || true
   printf '%s\n' "# >>> dk-srv kernel (hardening/install-hardening.sh, CIS 1.1.2): no device files, setuid or programs" \
     "tmpfs /dev/shm tmpfs defaults,rw,nosuid,nodev,noexec,relatime 0 0" "$tmp_line" "# <<< dk-srv kernel" >> "$fstab_t"
   put "$fstab_t" /etc/fstab 644; rm -f "$fstab_t"
@@ -329,10 +305,9 @@ sysctl_contradictions() {
 # changed (in the first run of step 15 it was never run).
 ensure_boot_cmdline() {
   local audit="" params missing
-  [ -e /etc/audit/rules.d/60-dk-srv-cis.rules ] || [ -e /etc/audit/rules.d/60-storybook-cis.rules ] && audit=" audit=1 audit_backlog_limit=8192"
+  [ -e /etc/audit/rules.d/60-dk-srv-cis.rules ] && audit=" audit=1 audit_backlog_limit=8192"
   params="apparmor=1 security=apparmor$audit"
   sed "s/@AUDIT@/$audit/" "$FILES/grub-60-dk-srv-cis.cfg" | put_text /etc/default/grub.d/60-dk-srv-cis.cfg 644
-  retire /etc/default/grub.d/60-storybook-cis.cfg
   if ! command -v update-grub > /dev/null; then warn "update-grub not found – the kernel command line isn't set"; return 0; fi
   missing=$(grub_missing "$params")
   if [ -z "$missing" ]; then say "unchanged: /boot/grub/grub.cfg boots with $params"; return 0; fi
@@ -355,7 +330,6 @@ grub_missing() {
 part_accounts() {
   step "accounts: umask, idle shells, home folder"
   put "$FILES/profile-60-dk-srv-cis.sh" /etc/profile.d/60-dk-srv-cis.sh 644
-  retire /etc/profile.d/60-storybook-cis.sh
   if grep -qE '^UMASK[[:space:]]+027' /etc/login.defs; then say "unchanged: /etc/login.defs UMASK 027"
   else say "/etc/login.defs: UMASK 027"; [ "$dry" = yes ] || { backup /etc/login.defs; sed -i -E 's/^UMASK[[:space:]].*/UMASK\t\t027/' /etc/login.defs; changed_paths+=(/etc/login.defs); }; fi
   echo "umask 027" | set_block /etc/bash.bashrc umask
@@ -382,7 +356,6 @@ part_accounts() {
 
   step "accounts: su only for root, sudo log"
   getent group sugroup > /dev/null || { say "new empty group sugroup (nobody may use su)"; act groupadd sugroup; note_changed /etc/group /etc/group- /etc/gshadow /etc/gshadow-; }
-  rename_notes /etc/pam.d/su
   if grep -qE '^[[:space:]]*auth[[:space:]]+required[[:space:]]+pam_wheel\.so.*group=sugroup' /etc/pam.d/su; then say "unchanged: /etc/pam.d/su"
   else
     say "/etc/pam.d/su: only members of sugroup (nobody) may use su – sudo is the way"
@@ -391,7 +364,7 @@ part_accounts() {
 }' /etc/pam.d/su; changed_paths+=(/etc/pam.d/su); }
   fi
   local t; t=$(mktemp); cp "$FILES/sudoers-60-dk-srv-cis" "$t"
-  if visudo -cqf "$t"; then put "$t" /etc/sudoers.d/60-dk-srv-cis 440; retire /etc/sudoers.d/60-storybook-cis; else warn "sudo rule file not valid – skipped"; fi
+  if visudo -cqf "$t"; then put "$t" /etc/sudoers.d/60-dk-srv-cis 440; else warn "sudo rule file not valid – skipped"; fi
   rm -f "$t"
   [ -e /var/log/sudo.log ] || { say "new: /var/log/sudo.log"; [ "$dry" = yes ] || install -m 600 -o root -g root /dev/null /var/log/sudo.log; }
 }
@@ -434,7 +407,6 @@ part_logging() {
   step "logging: journald, time servers, log file rights"
   put "$FILES/journald-60-dk-srv-cis.conf" /etc/systemd/journald.conf.d/60-dk-srv-cis.conf 644
   put "$FILES/timesyncd-60-dk-srv-cis.conf" /etc/systemd/timesyncd.conf.d/60-dk-srv-cis.conf 644
-  retire /etc/systemd/journald.conf.d/60-storybook-cis.conf /etc/systemd/timesyncd.conf.d/60-storybook-cis.conf
   if [ "$dry" = no ]; then
     systemctl restart systemd-journald
     journalctl --vacuum-size=1G > /dev/null 2>&1 || true
@@ -525,7 +497,6 @@ part_auditd() {
       echo "-a always,exit -F path=$p -F perm=x -F auid>=1000 -F auid!=unset -k privileged"; done; } \
     | put_text /etc/audit/rules.d/61-dk-srv-privileged.rules 640
   put "$FILES/audit-99-dk-srv-finalize.rules" /etc/audit/rules.d/99-dk-srv-finalize.rules 640
-  retire /etc/audit/rules.d/60-storybook-cis.rules /etc/audit/rules.d/61-storybook-privileged.rules /etc/audit/rules.d/99-storybook-finalize.rules
   # its own log: at most 10 × 20 MB; when the disk gets full it pauses recording (CIS wants the
   # server to stop – we prefer the apps keep running; accepted, see SECURITY.md, A5)
   if [ -e /etc/audit/auditd.conf ] && [ "$dry" = no ]; then
@@ -556,7 +527,6 @@ part_aide() {
   # (without the recommended mail program – it pulls in a mail server; nothing here sends mail)
   apt_install --no-install-recommends aide aide-common
   render "$FILES/aide-90-dk-srv" | put_text /etc/aide/aide.conf.d/90_dk-srv 644
-  retire /etc/aide/aide.conf.d/90_storybook
   if [ "$dry" = no ] && ! aide --config /etc/aide/aide.conf --config-check > /dev/null 2>&1; then
     warn "AIDE doesn't accept its configuration (see: sudo aide --config /etc/aide/aide.conf --config-check)"; return 1
   fi
@@ -583,7 +553,6 @@ part_aide() {
   # stays Ubuntu's ("static"), the timer is enabled.
   put "$FILES/aide-dailyaidecheck.service.conf" /etc/systemd/system/dailyaidecheck.service.d/60-dk-srv.conf 644
   put "$FILES/aide-dailyaidecheck.timer.conf" /etc/systemd/system/dailyaidecheck.timer.d/60-dk-srv.conf 644
-  retire /etc/systemd/system/dailyaidecheck.service.d/60-storybook.conf /etc/systemd/system/dailyaidecheck.timer.d/60-storybook.conf
   local u next
   if [ "$dry" = no ]; then
     systemctl daemon-reload
@@ -609,7 +578,6 @@ part_postgres() {
   [ -n "$ver" ] || { warn "no PostgreSQL cluster \"main\" found"; return 1; }
   apt_install "postgresql-$ver-pgaudit"
   put "$FILES/postgresql-60-dk-srv-cis.conf" "/etc/postgresql/$ver/main/conf.d/60-dk-srv-cis.conf" 644 postgres:postgres
-  retire "/etc/postgresql/$ver/main/conf.d/60-storybook-cis.conf"
   if [ "$dry" = yes ]; then say "would restart PostgreSQL if its settings changed; each app's databases: only its owner may connect"; return 0; fi
   if [[ " ${changed_paths[*]} " == *"/conf.d/60-dk-srv-cis.conf "* ]]; then
     say "restarting PostgreSQL (a few seconds) …"
@@ -640,11 +608,9 @@ part_postgres() {
   say "pgAudit: $(psql_ -tAc "SHOW pgaudit.log" 2>/dev/null || echo '?'); connection logging: $(psql_ -tAc 'SHOW log_connections')"
   # the apps' connections were cut by the restart: start them fresh
   if [ "${restarted:-no}" = yes ]; then
-    local proc user
     for a in $(apps); do
-      proc=$(app_get "$a" PM2_PROCESS); user=$(app_get "$a" APP_USER)
-      [ -n "$proc" ] && [ -n "$user" ] || continue
-      if as_user "$user" pm2 restart "$proc" > /dev/null 2>&1; then say "$a restarted"; else warn "couldn't restart $a – as $user: pm2 restart $proc"; fi
+      app_service "$a" > /dev/null || continue
+      if app_restart "$a"; then say "$a restarted"; else warn "couldn't restart $a – sudo systemctl restart $(app_service "$a")"; fi
     done
   fi
 }

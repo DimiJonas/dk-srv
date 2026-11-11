@@ -156,7 +156,9 @@ rate limits for its API) are in the app's repository and document.
 | Updates show the new commits (and for an app, what changed in its root folder) before anything runs | ✅ |
 | The apps' and sites' settings (`apps.d`, `sites.d`) are `KEY=value` files that are **read, never run**; an app's mode command must be a root-owned program in `/usr/local/sbin` | ✅ |
 | The server pulls with a **read-only, fine-grained token** (only the repositories it needs), in a root-only file; its expiry date is in the weekly report | ✅ |
-| Each app's backend runs as its own unprivileged user | 🔜 (today the storybook's backend shares the admin user – ROADMAP.md) |
+| Each app's backend runs as **its own user** (system user: no password, no shell, not in `sudo`), as a systemd service with a sandbox (read-only file system except its data, no new privileges or capabilities, kernel and other processes off limits, only the needed system calls) – the storybook's: `systemd-analyze security` 1.4 "OK"; checked nightly (service user, login shell, admin groups, sandbox on) | ✅ |
+| An app's code belongs to the admin user (`DEPLOY_USER`), not to the app: a hole in the app can't change the code it runs | ✅ |
+| The ntfy topic is readable only for root and the group `dk-notify` (the admin user and the apps' users) | ✅ |
 
 ## 5. Monitoring (what sends a notification)
 

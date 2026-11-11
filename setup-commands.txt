@@ -2,8 +2,7 @@
 # SETTING UP THE SERVER – a fresh Ubuntu 24.04 server, hardened, ready for apps and static sites
 #
 # Do these steps first; each app has its own setup afterwards (the storybook's:
-# project_setup_commands.txt in its repository). The server of November 2026, which still has
-# the storybook's own server scripts: the last section, "Moving from the storybook's scripts".
+# project_setup_commands.txt in its repository).
 #
 # Where to run each command:
 #   (laptop)  on your own computer
@@ -13,10 +12,12 @@
 # SERVER = the server's IP address or name, as you'd type it after `ssh` (e.g. 203.0.113.10)
 #
 # What dk-srv puts where (README.md has the whole list):
-#   /opt/dk-srv                 this repository, owned by root (sudo git -C /opt/dk-srv pull)
+#   /opt/dk-srv                 this repository, owned by root (updated with: sudo dk-srv-update)
 #   /etc/dk-srv/                its settings: dk-srv.conf, notify.conf (the ntfy topic – only
 #                               here), git-credentials (the read token – root only), apps.d/, sites.d/
 #   /usr/local/sbin/dk-*        its commands;  /var/log/dk-srv/  its logs
+#   /srv/<app>, <app>.service   each app's code and its service, as the app's own user
+#                               (no login, no sudo – the app's setup creates it)
 ###################################################################################################
 
 
@@ -138,8 +139,8 @@ sudo dpkg-reconfigure -plow unattended-upgrades
 cat /etc/apt/apt.conf.d/20auto-upgrades
 
 # (server) restart automatically at 04:30 when an update needs it (a new kernel only protects
-# after a restart). The apps start again by themselves (pm2), and their nightly backups are done
-# by then.
+# after a restart). The apps start again by themselves (their systemd services), and their
+# nightly backups are done by then.
 printf 'Unattended-Upgrade::Automatic-Reboot "true";\nUnattended-Upgrade::Automatic-Reboot-Time "04:30";\n' | sudo tee /etc/apt/apt.conf.d/52unattended-upgrades-reboot
 
 # (server) check which package sources are updated automatically ("Allowed origins")
@@ -208,13 +209,14 @@ sudo stat -c '%a %U:%G' /etc/dk-srv/git-credentials; sudo wc -l /etc/dk-srv/git-
 # to yourself: whoever knows it can read and send your notifications
 echo "dk-$(openssl rand -hex 16)"
 
-# (server) the clone, owned by root (so nothing root runs can be changed by appuser). The
-# credential setting is stored in the clone, so later `sudo git -C /opt/dk-srv pull` works too
-# (with a public dk-srv the token simply isn't needed).
+# (server) the clone, owned by root (so nothing root runs can be changed by appuser). Later
+# updates: sudo dk-srv-update (maintenance-commands.txt). The credential setting is stored in the
+# clone; with a public dk-srv the token simply isn't needed.
 sudo git clone -c credential.helper='store --file=/etc/dk-srv/git-credentials' https://github.com/DimiJonas/dk-srv /opt/dk-srv
 
 # (server) install: the dk-* commands, cron, log rotation, the SSH-login notification, fail2ban.
-# Asks for the ntfy topic once (stored only in /etc/dk-srv/notify.conf) and sends a test message.
+# Asks for the ntfy topic once (stored only in /etc/dk-srv/notify.conf, readable for the group
+# dk-notify: you and the apps' users) and sends a test message.
 sudo /opt/dk-srv/install.sh
 
 # (server) the settings: MODE=trial for now (the nightly check only notifies), and the token's
@@ -231,7 +233,7 @@ curl -sI http://127.0.0.1; echo "exit code $? (52 = closed without an answer, as
 # =================================================================================================
 # 11. The apps
 #     Each app's own setup (the storybook's: project_setup_commands.txt in its repository). It
-#     ends with registering the app's root parts:
+#     ends with registering the app's root parts, which also create its own user and its service:
 #       sudo dk-app-update storybook https://github.com/DimiJonas/storybook
 #     Do this before step 13: the hardening reads the apps' settings (databases, sensitive places).
 # =================================================================================================
@@ -331,55 +333,3 @@ sudo dk-weekly-report --print
 
 # When the checks have been quiet for a while: MODE=auto in /etc/dk-srv/dk-srv.conf (the nightly
 # check then switches an app's maintenance mode or the server's lockdown on by itself).
-
-
-###################################################################################################
-# MOVING FROM THE STORYBOOK'S SCRIPTS (once, on the server of November 2026)
-#
-# Until the split, the server scripts lived in the storybook repository (ops/security,
-# ops/hardening, ops/install-nginx.sh, …) and root ran them from ~/storybook. Afterwards dk-srv
-# runs them from /opt/dk-srv, and the storybook's root parts come from /opt/dk-apps/storybook.
-# Nothing about the hardening changes – only names and places (…storybook… -> …dk-srv…).
-#
-# Order: the storybook's split update first (deployed as usual – its own maintenance commands),
-# then these steps. Keep a SECOND SSH session open with a root shell (sudo -i) the whole time.
-###################################################################################################
-
-# (server) step 9: the read token – while dk-srv and the storybook are still private, for all
-# three: DimiJonas/dk-srv, DimiJonas/storybook, DimiJonas/dk-home (Contents: read-only)
-
-# (server) the clone (step 10, first command)
-sudo git clone -c credential.helper='store --file=/etc/dk-srv/git-credentials' https://github.com/DimiJonas/dk-srv /opt/dk-srv
-
-# (server) see what the move would do, then do it: settings, memory and logs to dk-srv's places,
-# then dk-srv's install.sh (the commands storybook-notify, -security-check, … become dk-*; cron,
-# log rotation, PAM line and fail2ban are renamed). No question about the ntfy topic: it's moved.
-sudo /opt/dk-srv/migrate/from-storybook.sh --dry-run
-sudo /opt/dk-srv/migrate/from-storybook.sh
-
-# (server) the token's expiry date: GIT_TOKEN_EXPIRES=YYYY-MM-DD
-sudo nano /etc/dk-srv/dk-srv.conf
-
-# (server) the storybook's root parts from their root-owned copy (registers it in apps.d – the
-# hardening reads that). Shows what it will install and asks.
-sudo dk-app-update storybook https://github.com/DimiJonas/storybook
-
-# (server) the hardening parts again: they put their files under the new names and remove the old
-# ones (nothing else changes – the dry run shows exactly that)
-sudo /opt/dk-srv/hardening/install-hardening.sh --dry-run all
-sudo /opt/dk-srv/hardening/install-hardening.sh packages ssh kernel accounts logging firewall postgres
-sudo /opt/dk-srv/hardening/install-hardening.sh pam
-sudo /opt/dk-srv/hardening/install-hardening.sh auditd aide
-
-# (server) the static site: REPO=https://github.com/DimiJonas/dk-home in its sites.d file, then
-# its files, then nginx (which also renames its settings file and removes the old picture config)
-sudo nano /etc/dk-srv/sites.d/<name>.conf      (<name>: ls /etc/dk-srv/sites.d/)
-sudo dk-site-update <name>
-sudo /opt/dk-srv/nginx/install-nginx.sh
-
-# (server) nothing of the old names left (prints nothing, or only files you know)
-ls /usr/local/sbin | grep storybook | grep -v '^storybook-mode$'
-ls /etc/cron.d /etc/fail2ban/jail.d /etc/sysctl.d /etc/ssh/sshd_config.d | grep storybook
-
-# (server) restart, then the checks of step 13 (after "sudo reboot") and the audits of step 14
-sudo reboot

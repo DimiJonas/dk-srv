@@ -144,20 +144,26 @@ sh_ "PostgreSQL packages (pgaudit?)" 'dpkg -l | grep -E "^ii\s+postgresql" | awk
 section "dk-srv (settings, clones, nightly checks)"
 sh_ "settings and registered apps/sites (no secrets)" "grep -vE '^\s*(#|$)' '$DK_ETC/dk-srv.conf' 2>&1; stat -c '%a %U:%G %n' '$DK_ETC' '$DK_ETC'/* '$DK_ETC'/apps.d/* '$DK_ETC'/sites.d/* 2>/dev/null; for f in '$DK_ETC'/apps.d/*.conf; do [ -f \"\$f\" ] && { echo \"--- \$f\"; grep -vE '^\s*(#|$)' \"\$f\"; }; done"
 sh_ "root-owned clones (owner, rights, remote, last commit)" 'for d in /opt/dk-srv /opt/dk-apps/* /opt/dk-sites/*; do [ -d "$d/.git" ] || continue; echo "$(stat -c "%a %U:%G" "$d") $d  $(git -c safe.directory="*" -C "$d" remote get-url origin)  $(git -c safe.directory="*" -C "$d" log -1 --format="%h %cs %s")"; git -c safe.directory="*" -C "$d" sparse-checkout list 2>/dev/null | sed "s/^/   sparse: /"; done'
-sh_ "nightly checks" 'grep -vE "^\s*(#|$)" /etc/cron.d/dk-srv 2>/dev/null; ls -la /var/lib/dk-srv 2>/dev/null | head -30; echo "--- hardening parts installed: $(paste -sd" " /var/lib/dk-srv/hardening-parts 2>/dev/null)"; echo "--- old names left (before dk-srv; the storybook'"'"'s own files – apps.d, its nginx sites, storybook-mode, /var/lib/storybook – are not old):"; ls -d /usr/local/sbin/storybook-{notify,security-check,weekly-report,ssh-notify,aide-check} /usr/local/lib/storybook /etc/cron.d/storybook /var/log/storybook /etc/storybook/{notify,security-check,logrotate}.conf /etc/storybook/usg-tailoring.xml /etc/*/*-storybook* /etc/*/*/*-storybook* /etc/*/*/*_storybook /etc/*/*.before-storybook /etc/fail2ban/*/storybook* /etc/nginx/conf.d/storybook* 2>/dev/null | grep -v dk-app- | sort -u; grep -lsE "# storybook(:| \\(CIS)" /etc/sysctl.conf /etc/sysctl.d/*.conf /etc/ufw/sysctl.conf /etc/pam.d/su /etc/nginx/nginx.conf | sed "s/$/  (notes with the old names)/"; echo "--- drift check now:"; bash -c ". /usr/local/lib/dk-srv/security-lib.sh && hardening_drift" 2>/dev/null || echo "(dk-srv not installed)"'
+sh_ "nightly checks" 'grep -vE "^\s*(#|$)" /etc/cron.d/dk-srv 2>/dev/null; ls -la /var/lib/dk-srv 2>/dev/null | head -30; echo "--- hardening parts installed: $(paste -sd" " /var/lib/dk-srv/hardening-parts 2>/dev/null)"; echo "--- drift check now:"; bash -c ". /usr/local/lib/dk-srv/security-lib.sh && hardening_drift" 2>/dev/null || echo "(dk-srv not installed)"'
 
 for a in $(apps); do
   section "App $a (/etc/dk-srv/apps.d/$a.conf)"
   user=$(app_get "$a" APP_USER); dir=$(app_get "$a" RUNTIME_DIR); bl=$(app_get "$a" BACKUP_LOG)
   [[ $user =~ ^[a-z_][a-z0-9_-]*$ ]] || continue
-  uhome=$(getent passwd "$user" | cut -d: -f6)
-  sh_ "mode, Node.js, pm2" "$(app_mode_cmd "$a" 2>/dev/null || echo true) status 2>&1 | head -5; node -v; runuser -u '$user' -- env HOME='$uhome' PATH=/usr/local/bin:/usr/bin:/bin pm2 ls 2>&1 | sed -E 's/[[:space:]]+/ /g' | head -12"
-  sh_ "processes run as" "ps -eo user=,args= | grep -E '[n]ode |[P]M2' | sed -E 's#(/home/[^/ ]+)#~#g' | head -5"
+  duser=$(app_get "$a" DEPLOY_USER); [[ $duser =~ ^[a-z_][a-z0-9_-]*$ ]] || duser=$user   # owns the code
+  uhome=$(getent passwd "$duser" | cut -d: -f6)
+  svc=$(app_service "$a" 2>/dev/null || true)
+  sh_ "mode, Node.js, service" "$(app_mode_cmd "$a" 2>/dev/null || echo true) status 2>&1 | head -5; node -v; [ -n '$svc' ] && systemctl show -p User -p Group -p SupplementaryGroups -p ActiveState -p UnitFileState -p NRestarts -p ExecMainStartTimestamp '$svc' 2>&1"
+  if [ -n "$svc" ]; then
+    sh_ "its sandbox (systemd-analyze security – lower is better)" "systemd-analyze security --no-pager '$svc' 2>&1 | grep -vE '^ *✓' | tail -25"
+    sh_ "its user" "getent passwd '$user' | cut -d: -f1,3,6,7; id '$user'; sudo -l -U '$user' 2>&1 | tail -2"
+  fi
+  sh_ "processes run as" "ps -eo user=,args= | grep -E '[n]ode ' | sed -E 's#(/home/[^/ ]+)#~#g' | head -5"
   sh_ "permissions of its files and secrets (only looked at, not read)" "stat -c '%a %U:%G %n' '$uhome' '$dir' '$dir'/*/.env '$uhome/.pgpass' $(app_get "$a" AIDE_SENSITIVE) 2>&1; for p in $(app_get "$a" AIDE_SENSITIVE); do stat -c '%a %U:%G %n' \"\$p\"/* 2>/dev/null; done"
-  sh_ "repository state (the app user's copy)" "runuser -u '$user' -- git -C '$dir' status --short 2>&1 | head -10; runuser -u '$user' -- git -C '$dir' log --oneline -1; runuser -u '$user' -- git -C '$dir' remote get-url origin"
+  sh_ "repository state (the code, $duser's clone)" "runuser -u '$duser' -- git -C '$dir' status --short 2>&1 | head -10; runuser -u '$duser' -- git -C '$dir' log --oneline -1; runuser -u '$duser' -- git -C '$dir' remote get-url origin"
   if [ -n "$bl" ]; then
     bdir=$(dirname "$bl")
-    sh_ "backups (folder, newest files, schedule, encrypted?)" "stat -c '%a %U:%G %n' '$bdir' '$bdir'/* 2>&1 | head -8; ls -lt '$bdir/db' 2>/dev/null | head -4; du -sh '$bdir'/* 2>/dev/null; grep -HnE 'backup\.sh' /etc/crontab /etc/cron.d/* 2>/dev/null; crontab -u '$user' -l 2>/dev/null | grep -n 'backup\.sh'; tail -2 '$bl' 2>/dev/null; true"
+    sh_ "backups (folder, newest files, schedule, encrypted?)" "stat -c '%a %U:%G %n' '$bdir' '$bdir'/* 2>&1 | head -8; ls -lt '$bdir/db' 2>/dev/null | head -4; du -sh '$bdir'/* 2>/dev/null; grep -HnE 'backup\.sh' /etc/crontab /etc/cron.d/* 2>/dev/null; crontab -u '$duser' -l 2>/dev/null | grep -n 'backup\.sh'; tail -2 '$bl' 2>/dev/null; true"
   fi
 done
 

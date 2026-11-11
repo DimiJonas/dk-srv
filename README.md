@@ -47,6 +47,10 @@ mechanism so that each one can be understood, checked and undone.
 - an app registers itself with one settings file (`/etc/dk-srv/apps.d/<app>.conf`, parsed, never
   run); its root parts come from a root-owned partial clone of just its `ops/root/` folder
   (`dk-app-update`: shows what changed, asks, installs)
+- each app runs as **its own user** (no login, no sudo, can't change its code) as a sandboxed
+  systemd service – the storybook's scores 1.4 "OK" in `systemd-analyze security` (9.0 "UNSAFE"
+  without); the nightly check reports if a service ever runs as another user or loses its sandbox
+- dk-srv updates itself the same way (`dk-srv-update`) and says which hardening parts to run again
 - static sites from their own repositories (`dk-site-update`): every file checked by its content,
   picture metadata removed, root-owned, served without scripts
 
@@ -61,7 +65,6 @@ mechanism so that each one can be understood, checked and undone.
 | [`nginx/`](nginx/) | the server-wide nginx part and the static-site template |
 | [`fail2ban/`](fail2ban/) | scanner and rate-limit jails, with notifications |
 | [`etc/`](etc/) | examples of the settings files (the real ones live only on the server) |
-| [`migrate/`](migrate/) | the one-time move from the storybook repository's scripts |
 
 On the server: `/opt/dk-srv` (this repository, owned by root), `/etc/dk-srv/` (settings – the ntfy
 topic and the read token only there), `/var/lib/dk-srv/` (memory), `/var/log/dk-srv/` (logs).
@@ -72,6 +75,6 @@ shellcheck and in a sandbox before every deploy.
 
 ## Status
 
-In daily use on one server. Next step: each app's backend as its own user (`ROADMAP.md`).
+In daily use on one server. What's done and what might come: `ROADMAP.md`.
 
 © All rights reserved. The code is public to read; there is no license for reuse.

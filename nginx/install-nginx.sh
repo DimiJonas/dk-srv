@@ -49,7 +49,6 @@ for d in $(grep -oE '^[a-z_]+' "$work/http-hardening.conf" | sort -u); do
   fi
 done
 plan_file "$NGINX_DIR/conf.d/dk-srv-hardening.conf" "$work/http-hardening.conf"
-plan_remove "$NGINX_DIR/conf.d/storybook-hardening.conf"     # its name before dk-srv
 
 # --- default-deny instead of Ubuntu's default site
 cp "$HERE/default-deny.conf" "$work/default-deny"
@@ -58,7 +57,7 @@ plan_link default-deny
 plan_unlink default
 
 # --- only TLS 1.2 and 1.3, also for sites that don't set it themselves
-if grep -qE '^[[:space:]]*ssl_protocols[^;]*TLSv1(\.1)?[[:space:];]|# storybook: no TLS' "$NGINX_DIR/nginx.conf" 2>/dev/null; then   # (or only our older note)
+if grep -qE '^[[:space:]]*ssl_protocols[^;]*TLSv1(\.1)?[[:space:];]' "$NGINX_DIR/nginx.conf" 2>/dev/null; then
   sed -E 's/^([[:space:]]*)ssl_protocols[^;]*;.*/\1ssl_protocols TLSv1.2 TLSv1.3; # dk-srv: no TLS 1.0\/1.1 (CIS NGINX)/' "$NGINX_DIR/nginx.conf" > "$work/nginx.conf"
   plan_file "$NGINX_DIR/nginx.conf" "$work/nginx.conf"
 fi

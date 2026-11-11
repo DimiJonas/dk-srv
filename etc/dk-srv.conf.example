@@ -8,9 +8,6 @@ MODE=trial
 # The administrator's account: the only one that may log in by SSH (AllowUsers), with sudo
 ADMIN_USER=appuser
 
-# The group that may read /etc/dk-srv/notify.conf besides root (the apps send notifications too)
-NOTIFY_GROUP=appuser
-
 # When the read token for private repositories (/etc/dk-srv/git-credentials) expires – the weekly
 # report warns 30 days before. Empty: no token.
 GIT_TOKEN_EXPIRES=

@@ -17,3 +17,5 @@ notify.conf
 *~
 .DS_Store
 __pycache__/
+
+*.zip

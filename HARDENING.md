@@ -31,6 +31,7 @@ their own repositories and plug in through small settings files ([below](#apps-o
 | | `/opt/dk-srv/nginx/install-nginx.sh` | nginx for the whole server: settings for all sites, default-deny, TLS, the static sites |
 | | `dk-app-update <app>` | an app's root parts: its nginx sites, its mode command, its entry in `apps.d` |
 | | `dk-site-update <name>` | a static site's files, checked and put on the web |
+| | `dk-srv-update` | dk-srv itself: pull, show, ask, `install.sh` – and which hardening parts to run again |
 | **Switch** | `dk-mode status`, `lockdown`, `normal` | lockdown: the whole web server off, every app's backend stopped |
 | **Watch** | nightly security check (05:10), file integrity check (05:40), weekly report (Monday) | notify the phone when something changes or looks wrong |
 | **Measure** | `usg audit` (Ubuntu Pro), `hardening/collect-facts.sh` | the CIS score; a read-only, anonymised fact sheet for a review |
@@ -386,8 +387,8 @@ curl -sI https://<name>/picture.jpg | grep -iE 'content-type|content-security'
 ## Apps on this server
 
 An app tells dk-srv about itself with one file, `/etc/dk-srv/apps.d/<app>.conf` (only `KEY=value`
-lines – **read, never run**; `etc/app.conf.example` lists every key): who runs it, where it lives, its
-address, its npm folders, its mode command, its nginx sites, its places to leave out of or watch in
+lines – **read, never run**; `etc/app.conf.example` lists every key): its own user and service, its
+code and who owns it, its address, its npm folders, its mode command, its nginx sites, its places to leave out of or watch in
 the file integrity check, its backup log, its databases. The nightly check, the weekly report, the
 file integrity check, `dk-mode` and the hardening parts (`auditd`, `aide`, `postgres`) read it.
 
@@ -406,6 +407,37 @@ program in `/usr/local/sbin`; dk-srv refuses anything else. It answers `status -
 when its libraries have a critical vulnerability (with `MODE=auto`), and the whole server to
 lockdown for a critical one in the server's own packages.
 
+**Each app runs as its own user, in a sandbox.** Its user (`APP_USER`) is a system user: no
+password, no shell (`nologin`), no home folder, not in `sudo` – the app's install script creates it.
+Its code (`RUNTIME_DIR`, e.g. `/srv/storybook`) belongs to the admin user (`DEPLOY_USER`), who
+pulls, installs and builds; the app only reads it, so a hole in the app can't change the code it
+runs, nor reach the admin's SSH keys or backups. It runs as a systemd service (`SERVICE`):
+
+| Sandbox setting | What it takes away |
+|---|---|
+| `ProtectSystem=strict` + `ReadWritePaths=` | the whole file system is read-only for it – except its own data (the storybook's photos) |
+| `ProtectHome=yes` | `/home`, `/root` don't exist for it (that's why the code is in `/srv`) |
+| `PrivateTmp=yes`, `PrivateDevices=yes` | its own empty `/tmp`; no disks or terminals in `/dev` |
+| `NoNewPrivileges=yes`, `CapabilityBoundingSet=` (empty), `RestrictSUIDSGID=yes` | no way to more rights: setuid programs don't work, no capabilities |
+| `ProtectKernel*`, `ProtectClock`, `ProtectControlGroups`, `ProtectHostname`, `ProtectProc=invisible` | kernel settings, modules, logs, the clock and other processes are off limits |
+| `RestrictNamespaces`, `RestrictRealtime`, `LockPersonality`, `RemoveIPC`, `KeyringMode=private` | no containers of its own, no real-time scheduling, no leftovers between runs |
+| `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`, `SystemCallFilter=@system-service ~@privileged` | only the network kinds and system calls a normal service uses ("not permitted" otherwise) |
+
+`systemd-analyze security <service>` rates it: the storybook's **1.4 "OK"** (0 = locked down,
+10 = unprotected; the same service without these lines: 9.0 "UNSAFE"). What's left is on purpose
+and named in the file (network access, Node.js's run-time compiling, `/proc/cpuinfo`).
+The nightly drift check (`app_drift`) reports if the service runs as another user, if its user got
+a shell or an admin group, or if the sandbox was switched off.
+
+```sh
+systemctl show -p User -p NoNewPrivileges -p ProtectSystem storybook
+systemd-analyze security storybook            # every setting, and the score at the end
+sudo bash -c '. /usr/local/lib/dk-srv/security-lib.sh; app_drift'    # empty = all in place
+```
+
+The ntfy topic (`/etc/dk-srv/notify.conf`) is readable for the group `dk-notify` only: the admin
+user and the apps' users, which send notifications too.
+
 The app's own business stays in its repository: its backups (the storybook's are encrypted with
 `age` to a public key, so the server can't read its own backups), its restore test, its code.
 
@@ -418,7 +450,8 @@ The app's own business stays in its repository: its backups (the storybook's are
   running one), `/dev/shm`, `/tmp`, home rights, `su`, sudo, files without an existing owner/group
   (not in snaps), PAM and the password rules, Apport masked, the keep-config file, ufw (active,
   outgoing denied, **no unexpected open ports**), auditd, AIDE (database, timer, last check),
-  pgAudit, nginx default-deny, AppArmor. A change → "Hardening changed" (once per change).
+  pgAudit, nginx default-deny, AppArmor, and every app's user and sandbox. A change → "Hardening
+  changed" (once per change).
 - **File integrity** (05:40): see [aide](#aide-file-integrity).
 - **Weekly report** (Monday 08:00): all of it in one message – per app its mode, logins, backups and
   restore test, npm, certificate; the static sites; the days left on the read token
@@ -496,3 +529,8 @@ risks; with lesson 12 fixed, **100 %** without the accepted risks. What was behi
     private picture. Splitting them made the app publishable, the server reusable for more apps,
     and the private files private – and the interface between them (`apps.d`, `sites.d`) is now
     written down instead of hidden in paths.
+16. **A shared account shares everything.** The storybook's backend ran as the admin user – the
+    one with SSH keys, sudo and the backups. A hole in the app would have been a hole in all of
+    that. Its own user, without a shell and in a sandbox, turns "the server" into "the photos and
+    the app's database" – and `systemd-analyze security` makes the difference measurable
+    (9.0 → 1.4).

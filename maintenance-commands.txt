@@ -25,17 +25,14 @@ sudo dk-weekly-report --print
 # Updating dk-srv (after a push to its repository)
 # =================================================================================================
 
-# (server) pull (root-owned clone), look at what's new, then install the commands again
-sudo git -C /opt/dk-srv pull
-sudo git -C /opt/dk-srv log --oneline -5
-sudo /opt/dk-srv/install.sh
+# (server) pulls the root-owned clone (/opt/dk-srv), shows the new commits and changed files, asks,
+# runs the new install.sh – and then names what else to run, with the exact commands: the
+# hardening parts whose files or code changed, nginx, the tailoring file (it doesn't run those
+# itself: for "ssh" and "pam" keep a second SSH session open, with sudo -i)
+sudo dk-srv-update
 
-# (server) if the hardening files changed (git log names them): that part again, e.g.
-sudo /opt/dk-srv/hardening/install-hardening.sh --dry-run all
-sudo /opt/dk-srv/hardening/install-hardening.sh kernel
-# (server) if nginx/ changed
-sudo /opt/dk-srv/nginx/install-nginx.sh --diff
-sudo /opt/dk-srv/nginx/install-nginx.sh
+# (server) the same by hand, if ever needed
+sudo git -C /opt/dk-srv pull && sudo /opt/dk-srv/install.sh
 
 # (server) an app's root parts changed (its ops/root/ – the app's own deploy steps say when):
 # pulls, shows the new commits and what changed in ops/root/, asks, installs
@@ -133,9 +130,10 @@ sudo nano /var/lib/dk-srv/accepted
 # Change it with nano (Ctrl+O, Enter, Ctrl+X); applies from the next run.
 sudo nano /etc/dk-srv/dk-srv.conf
 
-# (server) the ntfy topic: only in this file on the server (root:appuser, -rw-r-----), never in
-# git – check that nobody else can read it
+# (server) the ntfy topic: only in this file on the server (root:dk-notify, -rw-r-----), never in
+# git – check that nobody else can read it, and who is in the group (you and the apps' users)
 stat -c '%A %U:%G %n' /etc/dk-srv /etc/dk-srv/notify.conf
+getent group dk-notify
 
 # (server) send a test notification; messages that couldn't be sent
 dk-notify "Test" "Hello from the server"

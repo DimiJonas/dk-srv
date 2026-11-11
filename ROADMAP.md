@@ -5,7 +5,8 @@
 | –   | ✅ Before dk-srv: security check, notifications, modes (storybook step 13)          | M    | –          |
 | –   | ✅ Before dk-srv: hardening by the CIS guides (storybook step 15 and its follow-up) | M–L  | –          |
 | 1   | ✅ Own repository: the server's scripts out of the storybook                        | M    | –          |
-| 2   | Each app's backend as its own user (the storybook's first)                         | M    | 1          |
+| 2   | ✅ Each app's backend as its own user, in a sandbox (the storybook's first)          | M    | 1          |
+| –   | Later: the apps' database logins without a password (PostgreSQL "peer" login)      | S    | 2          |
 | –   | Later: own AppArmor profiles for nginx, PostgreSQL, Node.js (A6)                   | M    | –          |
 | –   | Later: logs and notifications also off the server (A9)                             | S–M  | –          |
 | –   | Later: CIS Ubuntu 24.04 v2.0.0, as soon as USG implements it (A11)                 | S    | –          |
@@ -45,8 +46,8 @@ server's hardening, and a private page (the main domain's picture). Split into t
 **Decided:**
 
 - prefix `dk-` for everything of the server: commands `dk-*`, `/etc/dk-srv`, `/var/lib/dk-srv`,
-  `/var/log/dk-srv`, file names `…-dk-srv…` (the hardening renames its files from `…storybook…` and
-  removes the old ones; `migrate/from-storybook.sh` moves the settings, memory and logs once)
+  `/var/log/dk-srv`, file names `…-dk-srv…` (the server was moved once, with a migration script
+  that's gone again since)
 - **only root can change what root runs**: dk-srv is a root-owned clone (`/opt/dk-srv`); before,
   root ran scripts from the app user's clone
 - **the apps plug in** through `/etc/dk-srv/apps.d/<app>.conf` (`KEY=value`, parsed, never run):
@@ -69,8 +70,7 @@ server's hardening, and a private page (the main domain's picture). Split into t
 
 **Built:** `install.sh`, `bin/dk-{notify,mode,security-check,weekly-report,ssh-notify,aide-check,
 app-update,site-update}`, `lib/` (shared functions, nginx planning with undo), `nginx/` (the
-server-wide part), `hardening/` (moved, renamed), `fail2ban/`, `migrate/from-storybook.sh`, the
-documents ([HARDENING.md](HARDENING.md), [SECURITY.md](SECURITY.md), the command files).
+server-wide part), `hardening/` (moved, renamed), `fail2ban/`, the documents ([HARDENING.md](HARDENING.md), [SECURITY.md](SECURITY.md), the command files).
 
 **Measured after the move** (2026-11-05, 23:50 and 23:52; the tailoring file is now
 `/etc/dk-srv/usg-tailoring.xml`): all rules **92.7 %** (344 pass, 13 fail – exactly the 13 accepted
@@ -79,14 +79,30 @@ settings changed, only names and places.
 
 ---
 
-## 2. Each app's backend as its own user
+## 2. Each app's backend as its own user, in a sandbox ✅
 
-Today the storybook's backend runs as `appuser` – the same account that logs in by SSH and has
-sudo. A hole in the app would give an attacker that account (and with the sudo password, root).
+Until now the storybook's backend ran as `appuser` – the account that logs in by SSH and has sudo.
+A hole in the app would have given an attacker that account. Now (with the storybook's step 17):
 
-- a system user per app (e.g. `storybook`, no login shell, no sudo), owning only what the app
-  writes (uploads, its logs); the code readable, not writable for it
-- pm2 for that user (or a systemd unit per app), `APP_USER` in its `apps.d` file
-- the database password and `server/.env` readable only by it
-- the backups stay with the admin user (they only need the database dump and the photos)
-- dk-srv: `as_user`, the drift check and AIDE for the new layout; `AllowUsers` stays `appuser`
+- **every app has its own user**: a system user without password, shell or home folder, not in
+  `sudo` – created by the app's `ops/root/install.sh`. `APP_USER` in its `apps.d` file
+- **its code belongs to the admin user** (`DEPLOY_USER`, new key): it pulls, installs, builds; the
+  app only reads it – so a hole in the app can't change the code it runs. The code lives outside
+  the home folders (the storybook's: `/srv/storybook`): those are `750` (CIS)
+- **it runs as a systemd service** (`SERVICE`, new key, instead of `PM2_PROCESS`) with a sandbox –
+  the storybook's `systemd-analyze security`: **1.4 "OK"** (without the sandbox: 9.0 "UNSAFE");
+  pm2 is gone. The nightly check restarts the service after a Node.js update (`systemctl
+  try-restart`), the hardening part `postgres` after a PostgreSQL restart
+- **checked every night** (`app_drift`, part of the drift check): the service runs as `APP_USER` –
+  not root, not the admin –, that user has no login shell and isn't in an admin group, and the
+  sandbox (`NoNewPrivileges`, `ProtectSystem=strict`) is still on
+- **npm audit** runs as `DEPLOY_USER` (the code's owner)
+- **the ntfy topic** is readable for the group **`dk-notify`** (created by `install.sh`; the admin
+  user and the apps' users) – the setting `NOTIFY_GROUP` is gone
+- the fact sheet shows each app's service, user and sandbox score
+- **`dk-srv-update`**: dk-srv updates itself the same way as the apps and sites (pull, show, ask,
+  install) – and names the hardening parts whose files or code changed (from git's hunk headers:
+  the function each change is in), nginx, the tailoring file. It runs none of them itself ("ssh"
+  and "pam" need a second session open)
+- what was only needed once for the move from the storybook repository is gone: `migrate/`, the
+  code that removed the old names, the notes renamed in other packages' files

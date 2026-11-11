@@ -1,0 +1,98 @@
+#!/bin/bash
+# Updates dk-srv itself – on the server, after a push to its repository:
+#
+#   sudo dk-srv-update           pull, show what's new, ask, install the commands (install.sh)
+#   sudo dk-srv-update --yes     the same without asking
+#
+# Like dk-app-update and dk-site-update: /opt/dk-srv is a root-owned clone that's never changed by
+# hand, so it simply takes what the repository has now (also after a rewritten history). Then it
+# runs the NEW install.sh (the commands, cron, log rotation, fail2ban, the PAM line) and says what
+# else to run, with the exact command:
+#   - the hardening parts whose files or code changed (only parts that are installed here). They
+#     are NOT run by this – "ssh" and "pam" need a second SSH session open (setup-commands.txt).
+#   - nginx/install-nginx.sh, if nginx/ changed
+#   - the tailoring file, if hardening/make-tailoring.py changed
+set -euo pipefail
+# (everything in one function, read completely before it runs: install.sh replaces this very file)
+main() {
+. "${DK_LIB:-/usr/local/lib/dk-srv}/security-lib.sh"
+: "${DK_SRC:=/opt/dk-srv}"
+yes=no; [ "${1:-}" = --yes ] && yes=yes
+need_root "$@"
+die() { echo "Stopped: $*" >&2; exit 1; }
+[ -d "$DK_SRC/.git" ] || die "$DK_SRC isn't a clone of dk-srv (setup-commands.txt, step 10)"
+
+before=$(git -C "$DK_SRC" rev-parse HEAD)
+git_follow "$DK_SRC" || die "couldn't get the repository's state into $DK_SRC (no connection?)"
+[ -d "$DK_STATE" ] && echo "$DK_SRC" >> "$DK_STATE/aide-expected"   # (changed on purpose)
+after=$(git -C "$DK_SRC" rev-parse HEAD)
+if [ "$before" = "$after" ]; then
+  echo "dk-srv is up to date ($(git -C "$DK_SRC" log -1 --format='%h %cs %s'))."
+  exit 0
+fi
+
+echo "== new in dk-srv:"
+git -C "$DK_SRC" log --oneline "$before..$after" 2>/dev/null | sed 's/^/   /' || echo "   (the history was rewritten – now at $(git -C "$DK_SRC" log -1 --format='%h %s'))"
+echo "== changed files:"
+git -C "$DK_SRC" diff --stat "$before" "$after" 2>/dev/null | sed 's/^/  /' || true
+if [ "$yes" = no ]; then
+  read -rp "Install it now (install.sh)? [y/N] " answer
+  [[ $answer =~ ^[yYjJ] ]] || { echo "Nothing installed. (The clone is updated – run sudo $DK_SRC/install.sh later.)"; exit 0; }
+fi
+
+"$DK_SRC/install.sh"
+
+# --- what else to run -----------------------------------------------------------------------------
+changed=$(git -C "$DK_SRC" diff --name-only "$before" "$after" 2>/dev/null || echo "hardening/install-hardening.sh nginx/")
+script="$DK_SRC/hardening/install-hardening.sh"
+parts=()
+add_part() { local p; for p in "$@"; do [[ " ${parts[*]} " == *" $p "* ]] || parts+=("$p"); done; }
+all_parts() { add_part packages ssh kernel accounts pam logging firewall auditd aide postgres; }
+for f in $changed; do
+  case "$f" in
+    hardening/files/*)
+      # the part (function part_<name>) that installs this file
+      p=$(awk -v file="${f#hardening/files/}" '
+        /^part_[a-z]+\(\) *\{/ { fn = $1; sub(/^part_/, "", fn); sub(/\(\).*/, "", fn) }
+        index($0, "$FILES/" file) && fn != "" { print fn; exit }' "$script")
+      if [ -n "$p" ]; then add_part "$p"; else all_parts; fi ;;
+    hardening/install-hardening.sh)
+      # git names the function each change is in (its hunk header); a change outside a part – a
+      # helper all parts use – means all of them
+      while IFS= read -r header; do
+        if [[ $header =~ part_([a-z]+)\(\) ]]; then add_part "${BASH_REMATCH[1]}"; else all_parts; fi
+      done < <(git -C "$DK_SRC" diff -U0 "$before" "$after" -- "$f" 2>/dev/null | grep '^@@' | sed -E 's/^@@[^@]*@@ ?//' || echo "")
+      ;;
+  esac
+done
+# only the parts installed on this server, in their usual order
+installed=()
+for p in packages ssh kernel accounts pam logging firewall auditd aide postgres; do
+  [[ " ${parts[*]} " == *" $p "* ]] && grep -qx "$p" "$DK_STATE/hardening-parts" 2>/dev/null && installed+=("$p")
+done
+
+todo=0
+echo
+if [ ${#installed[@]} -gt 0 ]; then
+  todo=1
+  echo "Hardening parts with changes: ${installed[*]}"
+  echo "Look first, then run them (for ssh and pam: a second SSH session open, with sudo -i):"
+  echo "   sudo $script --dry-run ${installed[*]}"
+  echo "   sudo $script ${installed[*]}"
+fi
+if grep -q '^nginx/' <<< "$changed"; then
+  todo=1
+  echo "nginx changed – look first, then install:"
+  echo "   sudo $DK_SRC/nginx/install-nginx.sh --diff"
+  echo "   sudo $DK_SRC/nginx/install-nginx.sh"
+fi
+if grep -q '^hardening/make-tailoring.py' <<< "$changed"; then
+  todo=1
+  echo "The accepted risks changed – the tailoring file anew (maintenance-commands.txt, \"Measuring\"):"
+  echo "   sudo usg generate-tailoring cis_level1_server /tmp/usg-tailoring.xml"
+  echo "   sudo python3 $DK_SRC/hardening/make-tailoring.py /tmp/usg-tailoring.xml $DK_ETC/usg-tailoring.xml"
+fi
+[ "$todo" = 1 ] || echo "Nothing else to run."
+}
+main "$@"
+exit $?

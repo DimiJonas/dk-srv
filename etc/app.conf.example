@@ -2,11 +2,16 @@
 # ops/root/install.sh (run by `sudo dk-app-update <app>`). Read, never run: only KEY=value lines.
 # Every key is optional; what's missing is simply not checked.
 
-# who runs it and where its copy for running is
-APP_USER=appuser
-RUNTIME_DIR=/home/appuser/myapp
-# its pm2 process (restarted after a Node.js update) and whether it uses Node.js at all
-PM2_PROCESS=backend
+# its own user (a system user: no password, no shell, no sudo) and its systemd service, which runs
+# as that user – restarted after a Node.js update; the nightly check reports if it ever runs as
+# another user or its sandbox is switched off
+APP_USER=myapp
+SERVICE=myapp.service
+# its code (a git clone) and who owns it: the admin user pulls, installs and builds; the app only
+# reads it (npm audit runs as DEPLOY_USER)
+RUNTIME_DIR=/srv/myapp
+DEPLOY_USER=appuser
+# whether it uses Node.js (the nightly check then also watches Node.js' security releases)
 NODE=yes
 # its address (checked after switching modes; certificate days in the weekly report)
 SITE_URL=https://myapp.example.org

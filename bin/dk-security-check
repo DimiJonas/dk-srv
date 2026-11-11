@@ -255,11 +255,10 @@ step "Programs still running replaced files (after updates)"
 restarts=0
 if [ "$mode_now" = normal ]; then
   for app in $(apps); do
-    proc=$(app_get "$app" PM2_PROCESS); user=$(app_get "$app" APP_USER)
-    [ -n "$proc" ] && [ -n "$user" ] && [ "$(app_mode "$app")" = normal ] || continue
-    pid=$(as_user "$user" pm2 pid "$proc" 2>/dev/null | tail -1)
-    if [ -n "$pid" ] && [ "$pid" != 0 ] && readlink "$PROC_DIR/$pid/exe" 2>/dev/null | grep -q '(deleted)'; then
-      if as_user "$user" pm2 restart "$proc" >/dev/null 2>&1; then
+    [ "$(app_mode "$app")" = normal ] || continue
+    pid=$(app_main_pid "$app")
+    if [ -n "$pid" ] && readlink "$PROC_DIR/$pid/exe" 2>/dev/null | grep -q '(deleted)'; then
+      if app_restart "$app" >/dev/null 2>&1; then
         restarts=$((restarts + 1))
         finding "$app restarted (it still ran the old Node.js)"
         send "$app restarted" "Node.js was updated; $app now runs $(node -v 2>/dev/null)." low arrows_counterclockwise
