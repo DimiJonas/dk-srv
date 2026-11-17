@@ -349,8 +349,13 @@ is stored in any repository – they're in the server's settings files.
   page): in the app's repository, installed by `dk-app-update`
 - every change is checked together (`nginx -t`); if nginx doesn't accept it, every file and link is
   put back as it was
+- **nginx starts again by itself** after a failed start (`nginx/nginx-restart.conf`, installed as
+  `/etc/systemd/system/nginx.service.d/60-dk-srv-restart.conf`): after 30 seconds, at most 5 times
+  in 5 minutes; then it stays "failed" and dk-site-watch notifies. The lockdown is unaffected – a
+  masked nginx is never started (lesson 18)
 
-**See for yourself.** `sudo nginx -T | less` · `sudo /opt/dk-srv/nginx/install-nginx.sh --diff`
+**See for yourself.** `sudo nginx -T | less` · `sudo /opt/dk-srv/nginx/install-nginx.sh --diff` ·
+`systemctl show -p Restart -p RestartUSec -p StartLimitBurst nginx`
 
 ## Static sites
 
@@ -441,7 +446,7 @@ user and the apps' users, which send notifications too.
 The app's own business stays in its repository: its backups (the storybook's are encrypted with
 `age` to a public key, so the server can't read its own backups), its restore test, its code.
 
-## Watching: the nightly checks
+## Watching: the nightly checks, and the sites every 10 minutes
 
 - **Security check** (05:10, `dk-security-check`): known vulnerabilities (Ubuntu `pro cves`, npm
   audit for every app's `NPM_DIRS`), updates, and the **drift check** (`hardening_drift` in
@@ -452,6 +457,13 @@ The app's own business stays in its repository: its backups (the storybook's are
   outgoing denied, **no unexpected open ports**), auditd, AIDE (database, timer, last check),
   pgAudit, nginx default-deny, AppArmor, and every app's user and sandbox. A change → "Hardening
   changed" (once per change).
+- **Sites** (every 10 minutes, `dk-site-watch`): does nginx run, does every app answer (200, or
+  503 in its maintenance mode) and its backend (`HEALTH_PATH`, e.g. the storybook's `/api/books`
+  with 401), does every static site answer (200)? It asks nginx on the server directly
+  (`curl --resolve <name>:443:127.0.0.1`, certificate checked), so the server's own name resolution
+  can't cause false alarms – it doesn't see problems outside the server (DNS records, the hoster's
+  network). A target that fails **two checks in a row** (10+ minutes) is a notification, and so is
+  its return. Nothing is checked during the lockdown.
 - **File integrity** (05:40): see [aide](#aide-file-integrity).
 - **Weekly report** (Monday 08:00): all of it in one message – per app its mode, logins, backups and
   restore test, npm, certificate; the static sites; the days left on the read token
@@ -464,6 +476,8 @@ The app's own business stays in its repository: its backups (the storybook's are
 sudo bash -c '. /usr/local/lib/dk-srv/security-lib.sh; hardening_drift'    # empty = all in place
 sudo dk-weekly-report --print
 sudo dk-mode status
+sudo dk-site-watch                                     # the sites, now
+sudo tail /var/log/dk-srv/site-watch.log               # when something was down and back
 ```
 
 ---
@@ -543,3 +557,11 @@ risks; with lesson 12 fixed, **100 %** without the accepted risks. What was behi
     And while it failed, systemd restarted it every 3 seconds without end: its default start limit
     (5 starts in 10 seconds) is never reached with 3 seconds between the tries. Every try built
     the whole sandbox again, on a small shared CPU. Now: at most 5 starts a minute, then "failed".
+18. **Two restarts at the same moment.** On 2026-11-14 an automatic update brought a new libc;
+    `needrestart` restarted every service using it – nginx and the name resolution in the same
+    second. nginx started while names couldn't be resolved, and the storybook's map tile proxy
+    named its server directly in `proxy_pass`: nginx looks such a name up at start, failed, and
+    refused to start. Nothing tried again, and nothing noticed – the site was down for 20 hours
+    until a look at it by chance. Three answers, one per gap: the tile server is looked up per
+    request (`resolver` + a variable), nginx starts again by itself after a failed start, and
+    `dk-site-watch` notifies within 10–20 minutes when a site stops answering.

@@ -12,6 +12,10 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # (the file integrity check, 05:40, isn't here: Ubuntu's systemd timer dailyaidecheck.timer runs
 # it – the CIS audit wants a timer. hardening/install-hardening.sh, part "aide")
 
+# are nginx, every app and every static site answering? Every 10 minutes (at :03, :13, …);
+# notifies when one stays down for two checks in a row, and when it's back (dk-site-watch)
+3-59/10 * * * * root /usr/local/sbin/dk-site-watch --quiet 2>> /var/log/dk-srv/site-watch.log
+
 # weekly report: Monday 08:00 (it logs itself; the screen output isn't needed here)
 0 8 * * 1 root /usr/local/sbin/dk-weekly-report > /dev/null 2>> /var/log/dk-srv/weekly-report.log
 

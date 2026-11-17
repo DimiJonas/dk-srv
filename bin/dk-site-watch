@@ -1,0 +1,136 @@
+#!/bin/bash
+# Is every site still answering? – every 10 minutes from cron (/etc/cron.d/dk-srv), as root:
+#
+#   sudo dk-site-watch            check now and show the result (notifies like the cron run)
+#   sudo dk-site-watch --quiet    the cron run: nothing on the screen, changes go to the log
+#
+# What it checks (nothing while dk-srv's lockdown is on – then everything is off on purpose):
+#   - nginx runs
+#   - every app answers at its address (SITE_URL in /etc/dk-srv/apps.d/): 200 – or 503 while the
+#     app's maintenance mode is on – and its backend answers (HEALTH_PATH with HEALTH_CODE, e.g.
+#     the storybook's /api/books with 401 = "running, asks for a login"): nginx alone can serve the
+#     start page while the backend is down
+#   - every static site answers at https://<name>/ (/etc/dk-srv/sites.d/): 200
+# It asks nginx on this server directly (curl --resolve <name>:443:127.0.0.1): a problem with the
+# server's own name resolution or internet connection can't cause a false alarm – but it doesn't
+# see what's outside the server either (the DNS records, the hoster's network).
+#
+# Notifies once when something fails two checks in a row (down for 10+ minutes – a short restart
+# doesn't alarm), and once when it answers again. Memory: /var/lib/dk-srv/site-watch
+# (one line per target: name, failed checks in a row, notified yes/no). Log: /var/log/dk-srv/site-watch.log
+set -uo pipefail
+. "${DK_LIB:-/usr/local/lib/dk-srv}/security-lib.sh"
+: "${LOG_FILE:=$DK_LOG_DIR/site-watch.log}"
+: "${STATE_FILE:=$DK_STATE/site-watch}"
+: "${LOCAL_IP:=127.0.0.1}"
+: "${FAILS_BEFORE_NOTIFY:=2}"
+quiet=no; [ "${1:-}" = --quiet ] && quiet=yes
+need_root "$@"
+mkdir -p "$DK_STATE" "$DK_LOG_DIR"
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG_FILE"; }
+say() { [ "$quiet" = yes ] || echo "$*"; }
+
+# only one run at a time (a slow answer must not let two runs overlap)
+exec 9> "$DK_STATE/site-watch.lock"
+flock -n 9 || exit 0
+
+if [ "$(server_mode)" = lockdown ]; then
+  say "dk-srv's lockdown is on – nothing checked (everything is off on purpose)."
+  exit 0
+fi
+
+# what the last runs found: name -> "failures notified"
+declare -A fails=() notified=()
+if [ -r "$STATE_FILE" ]; then
+  while IFS=$'\t' read -r name n was; do
+    [ -n "$name" ] || continue
+    fails[$name]=${n:-0}; notified[$name]=${was:-no}
+  done < "$STATE_FILE"
+fi
+declare -A seen=()
+changes=0
+
+# result NAME OK|FAIL WHAT – counts, notifies on the second failure in a row and when it's back
+result() {
+  local name=$1 status=$2 what=$3 n=${fails[$1]:-0} done=${notified[$1]:-no}
+  seen[$name]=1
+  if [ "$status" = OK ]; then
+    say "   ok      $name: $what"
+    if [ "$done" = yes ]; then
+      log "back: $name – $what"
+      notify "Back: $name" "$name answers again ($what)." default white_check_mark
+      changes=$((changes + 1))
+    fi
+    fails[$name]=0; notified[$name]=no
+  else
+    n=$((n + 1)); fails[$name]=$n
+    say "   FAILED  $name: $what (check $n in a row)"
+    [ "$n" = 1 ] && log "failed once: $name – $what"
+    if [ "$n" -ge "$FAILS_BEFORE_NOTIFY" ] && [ "$done" = no ]; then
+      log "down: $name – $what ($n checks in a row)"
+      notify "Down: $name" "$name: $what – for $(( (n - 1) * 10 ))+ minutes. Look: sudo dk-site-watch; sudo dk-mode status; sudo systemctl status nginx" urgent rotating_light
+      notified[$name]=yes; changes=$((changes + 1))
+    fi
+  fi
+}
+
+# answer HOST URL – the HTTP status nginx on this server gives for URL (000 = no answer). The
+# certificate is checked too: an expired one is an outage for every visitor.
+answer() {
+  curl -s -o /dev/null -w '%{http_code}' --max-time 15 --resolve "$1:443:$LOCAL_IP" "$2" 2>/dev/null || true
+}
+# what a status means, for the message
+meaning() {
+  case "$1" in
+    000) echo "no answer (nginx not reachable, or its certificate isn't valid – expired?)" ;;
+    502|504) echo "answers $1 – nginx runs, the app's backend doesn't answer" ;;
+    *) echo "answers $1" ;;
+  esac
+}
+
+say "Checking (asks nginx on this server directly):"
+if ! systemctl is-active --quiet nginx; then
+  result nginx FAIL "nginx isn't running ($(systemctl is-active nginx 2>/dev/null)) – sudo nginx -t; sudo systemctl start nginx"
+  # (the sites can't answer without nginx – their counters stay as they are)
+  for name in "${!fails[@]}"; do seen[$name]=1; done
+else
+  result nginx OK "running"
+  for app in $(apps); do
+    url=$(app_get "$app" SITE_URL)
+    [[ $url =~ ^https://([a-z0-9.-]+)(/.*)?$ ]] || continue
+    host=${BASH_REMATCH[1]}
+    case "$(app_mode "$app")" in
+      maintenance) expect=503 ;;
+      stopped) seen["app $app"]=1; continue ;;   # (stopped on purpose, e.g. for the lockdown)
+      *) expect=200 ;;
+    esac
+    code=$(answer "$host" "$url")
+    if [ "$code" = "$expect" ]; then result "app $app" OK "answers $code"
+    else result "app $app" FAIL "$(meaning "$code"), expected $expect"; fi
+    # its backend (not in maintenance mode: then it's stopped on purpose)
+    hpath=$(app_get "$app" HEALTH_PATH) hcode=$(app_get "$app" HEALTH_CODE)
+    if [ "$expect" = 200 ] && [[ $hpath =~ ^/[A-Za-z0-9/_.-]*$ && $hcode =~ ^[0-9]{3}$ ]]; then
+      code=$(answer "$host" "https://$host$hpath")
+      if [ "$code" = "$hcode" ]; then result "backend $app" OK "$hpath answers $code"
+      else result "backend $app" FAIL "$hpath $(meaning "$code"), expected $hcode"; fi
+    else
+      seen["backend $app"]=1
+    fi
+  done
+  for site in $(sites); do
+    host=$(site_get "$site" NAME); host=${host:-$site}
+    [[ $host =~ ^[a-z0-9.-]+$ ]] || continue
+    code=$(answer "$host" "https://$host/")
+    if [ "$code" = 200 ]; then result "site $site" OK "answers $code"
+    else result "site $site" FAIL "$(meaning "$code"), expected 200"; fi
+  done
+fi
+
+# remember (only what exists now – a removed site is forgotten)
+tmp=$(mktemp "$STATE_FILE.XXXXXX")
+for name in "${!seen[@]}"; do
+  printf '%s\t%s\t%s\n' "$name" "${fails[$name]:-0}" "${notified[$name]:-no}"
+done | sort > "$tmp"
+mv "$tmp" "$STATE_FILE"
+[ "$changes" -gt 0 ] || [ "$quiet" = yes ] || say "(nothing to report)"
+exit 0

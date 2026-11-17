@@ -60,7 +60,8 @@ as_user() {
 http_code() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$1" 2>/dev/null || true; }
 
 # --- the apps (/etc/dk-srv/apps.d/<app>.conf, written by each app's ops/root/install.sh) -------
-# Keys (see etc/app.conf.example): APP_USER SERVICE RUNTIME_DIR DEPLOY_USER SITE_URL LOGIN_PATH NPM_DIRS
+# Keys (see etc/app.conf.example): APP_USER SERVICE RUNTIME_DIR DEPLOY_USER SITE_URL HEALTH_PATH
+# HEALTH_CODE LOGIN_PATH NPM_DIRS
 # NODE MODE_CMD NGINX_SITES AIDE_EXCLUDE AIDE_SENSITIVE BACKUP_LOG RESTORE_TEST_LOG DATABASES
 # DB_OWNER DB_NO_AUDIT
 apps() {

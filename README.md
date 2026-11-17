@@ -40,6 +40,9 @@ mechanism so that each one can be understood, checked and undone.
   is every hardening setting still in place?
 - **phone notifications** (ntfy) for every SSH connection (by kind: terminal, file transfer, backup
   pull), banned attackers, unexplained file changes, security findings – and a weekly report
+- **outages**: every 10 minutes a check whether nginx, every app (and its backend) and every
+  static site answer – a notification when one stays down, and when it's back; nginx starts again
+  by itself after a failed start
 
 **Running apps and sites – without trusting them**
 - everything root runs comes from **root-owned** places; an app's user can change the app, never
@@ -62,7 +65,7 @@ mechanism so that each one can be understood, checked and undone.
 | [`bin/`](bin/) | the `dk-*` commands (copied to `/usr/local/sbin`) |
 | [`lib/`](lib/) | shared functions: settings, apps and sites, the drift check, nginx changes with undo |
 | [`hardening/`](hardening/) | the CIS hardening in parts, the tailoring for the audit, a fact sheet for reviews |
-| [`nginx/`](nginx/) | the server-wide nginx part and the static-site template |
+| [`nginx/`](nginx/) | the server-wide nginx part, the static-site template, nginx's restart setting |
 | [`fail2ban/`](fail2ban/) | scanner and rate-limit jails, with notifications |
 | [`etc/`](etc/) | examples of the settings files (the real ones live only on the server) |
 

@@ -167,7 +167,8 @@ rate limits for its API) are in the app's repository and document.
 SSH connections – by kind: terminal login, file transfer, other command, backup pull (with the
 key's name) · banned attackers · security findings (CVEs, npm) and maintenance mode/lockdown ·
 **unexplained changes to sensitive files** (AIDE) · **hardening settings that changed** · the read
-token about to expire · and a weekly report with all of it. The apps add their own (the storybook:
+token about to expire · **a site, an app's backend or nginx not answering for 10+ minutes**, and
+its return (`dk-site-watch`, every 10 minutes) · and a weekly report with all of it. The apps add their own (the storybook:
 locked accounts, failed backups and restore tests). Details: [`README.md`](README.md), "Notifications".
 
 ---

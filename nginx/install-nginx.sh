@@ -14,6 +14,8 @@
 #                                                /var/www/<name> – its files come from dk-site-update
 # and in /etc/nginx/nginx.conf only TLS 1.2 and 1.3 are allowed. Everything is checked together
 # (nginx -t); if nginx doesn't accept it, every file and link is put back as it was.
+# Also: /etc/systemd/system/nginx.service.d/60-dk-srv-restart.conf – nginx starts again by itself
+# after a failed start (nginx/nginx-restart.conf).
 #
 # /etc/dk-srv/sites.d/<name>.conf (etc/site.conf.example):
 #   NAME=example.org                the site's address – must be in the certificate
@@ -82,4 +84,18 @@ for site in $(sites); do
 done
 
 nginx_apply $only_diff
+
+# --- nginx starts again by itself after a failed start (a systemd addition, not nginx's config)
+dropin=/etc/systemd/system/nginx.service.d/60-dk-srv-restart.conf
+if ! cmp -s "$HERE/nginx-restart.conf" "$dropin"; then
+  if [ -n "$only_diff" ]; then
+    echo "== would install $dropin (nginx starts again by itself after a failed start)"
+  else
+    install -d -m 755 "${dropin%/*}"
+    install -o root -g root -m 644 "$HERE/nginx-restart.conf" "$dropin"
+    systemctl daemon-reload
+    echo "== $dropin installed (nginx starts again by itself after a failed start)"
+    [ -d "$DK_STATE" ] && echo "${dropin%/*}" >> "$DK_STATE/aide-expected"
+  fi
+fi
 if [ ${#warnings[@]} -gt 0 ]; then echo; echo "${#warnings[@]} warning(s):"; printf ' - %s\n' "${warnings[@]}"; fi

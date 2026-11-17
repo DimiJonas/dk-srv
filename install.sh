@@ -10,14 +10,15 @@
 # Why copies: the nightly checks run as root, so everything they run is copied to places only root
 # can change (and /opt/dk-srv itself belongs to root – no app user can change what root runs):
 #   /usr/local/sbin/dk-{notify,mode,security-check,weekly-report,ssh-notify,aide-check,
-#                       app-update,site-update,srv-update}
+#                       app-update,site-update,srv-update,site-watch}
 #   /usr/local/lib/dk-srv/security-lib.sh, nginx-lib.sh, cves.py
 #   /etc/dk-srv/dk-srv.conf        MODE=trial|auto, ADMIN_USER, GIT_TOKEN_EXPIRES
 #   /etc/dk-srv/notify.conf        your ntfy topic – only here, never in a repository
 #                                  (root:dk-notify, 640 – the group: the admin user and the apps'
 #                                  users, which send notifications too)
 #   /etc/dk-srv/apps.d/, sites.d/  one file per app (dk-app-update) / static site (by hand)
-#   /etc/cron.d/dk-srv             nightly check 05:10, weekly report Monday 08:00, log rotation
+#   /etc/cron.d/dk-srv             nightly check 05:10, site watch every 10 min, weekly report
+#                                  Monday 08:00, log rotation
 #                                  every hour (the file integrity check at 05:40 is a systemd
 #                                  timer: hardening/install-hardening.sh aide)
 #   /etc/dk-srv/logrotate.conf     log rotation: sudo.log, /var/log/dk-srv/, the apps' files in
@@ -37,7 +38,7 @@ if [ "$(stat -c %U "$HERE")" != root ] || [ -n "$(find "$HERE" -maxdepth 2 -perm
 fi
 
 step "1. commands -> /usr/local/sbin, library -> /usr/local/lib/dk-srv (owned by root)"
-for f in dk-notify dk-mode dk-security-check dk-weekly-report dk-ssh-notify dk-aide-check dk-app-update dk-site-update dk-srv-update; do
+for f in dk-notify dk-mode dk-security-check dk-weekly-report dk-ssh-notify dk-aide-check dk-app-update dk-site-update dk-srv-update dk-site-watch; do
   install -o root -g root -m 755 "$HERE/bin/$f" "/usr/local/sbin/$f"
   echo "   $f"
 done

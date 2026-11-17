@@ -6,6 +6,7 @@
 | –   | ✅ Before dk-srv: hardening by the CIS guides (storybook step 15 and its follow-up) | M–L  | –          |
 | 1   | ✅ Own repository: the server's scripts out of the storybook                        | M    | –          |
 | 2   | ✅ Each app's backend as its own user, in a sandbox (the storybook's first)          | M    | 1          |
+| 3   | ✅ Noticing and surviving outages: site watch, nginx restarts itself               | S    | 2          |
 | –   | Later: the apps' database logins without a password (PostgreSQL "peer" login)      | S    | 2          |
 | –   | Later: own AppArmor profiles for nginx, PostgreSQL, Node.js (A6)                   | M    | –          |
 | –   | Later: logs and notifications also off the server (A9)                             | S–M  | –          |
@@ -106,3 +107,22 @@ A hole in the app would have given an attacker that account. Now (with the story
   and "pam" need a second session open)
 - what was only needed once for the move from the storybook repository is gone: `migrate/`, the
   code that removed the old names, the notes renamed in other packages' files
+
+---
+
+## 3. Noticing and surviving outages ✅
+
+On 2026-11-14 the storybook was down for 20 hours, and nobody knew. An automatic libc update made
+`needrestart` restart nginx and the name resolution in the same second; nginx couldn't resolve the
+map tile server named in the storybook's config and refused to start (HARDENING.md, lesson 18).
+
+- **the cause** (in the storybook's nginx config): the tile server is looked up per request
+  (`resolver 127.0.0.53` and a variable in `proxy_pass`), not when nginx starts – a missing name
+  resolution now only means no new map tiles for that moment
+- **nginx starts again by itself**: a systemd addition (`nginx/nginx-restart.conf`, installed by
+  `install-nginx.sh`): after 30 seconds, at most 5 times in 5 minutes
+- **`dk-site-watch`**, every 10 minutes from cron: nginx running, every app (200, or 503 in
+  maintenance), its backend (new keys `HEALTH_PATH` and `HEALTH_CODE` – the storybook:
+  `/api/books`, 401), every static site (200). It asks nginx on the server directly (certificate
+  checked: an expired one counts as down). A notification after **two failed checks in a row**,
+  and when it's back; nothing during the lockdown

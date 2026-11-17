@@ -337,6 +337,10 @@ sudo ss -tlnp
 # (server) the weekly report now, on the screen
 sudo dk-weekly-report --print
 
+# (server) nginx, every app (and its backend) and every static site answer – this check runs every
+# 10 minutes from now on and notifies when one stays down
+sudo dk-site-watch
+
 # (laptop) optional online checks: https://www.ssllabs.com/ssltest/ and https://securityheaders.com
 
 # When the checks have been quiet for a while: MODE=auto in /etc/dk-srv/dk-srv.conf (the nightly

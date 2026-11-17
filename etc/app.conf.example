@@ -14,8 +14,14 @@ RUNTIME_DIR=/srv/myapp
 DEPLOY_USER=appuser
 # whether it uses Node.js (the nightly check then also watches Node.js' security releases)
 NODE=yes
-# its address (checked after switching modes; certificate days in the weekly report)
+# its address (checked after switching modes and every 10 minutes by dk-site-watch; certificate
+# days in the weekly report)
 SITE_URL=https://myapp.example.org
+# is its backend alive? dk-site-watch asks this path every 10 minutes and expects this status
+# (e.g. 401 = running, asks for a login) – nginx alone can serve the start page while the
+# backend is down
+HEALTH_PATH=/api/health
+HEALTH_CODE=200
 # its login address: wrong (401) and blocked (429) logins are counted in the weekly report
 LOGIN_PATH=/api/login
 # folders inside RUNTIME_DIR for the nightly npm audit (critical -> its maintenance mode)
