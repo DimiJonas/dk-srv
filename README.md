@@ -19,6 +19,48 @@ mechanism so that each one can be understood, checked and undone.
 - [`maintenance-commands.txt`](maintenance-commands.txt) – everyday commands, emergencies
 - [`ROADMAP.md`](ROADMAP.md) – how it got here, and what's next
 
+## At a glance
+
+```mermaid
+flowchart LR
+  internet["Internet"]
+  laptop["Laptop<br/>SSH keys"]
+  github["GitHub<br/>repositories"]
+  phone["Phone<br/>ntfy"]
+  subgraph host["Ubuntu 24.04 – CIS-hardened, measured with USG"]
+    fw["Firewall<br/>in and out"]
+    nginx["nginx<br/>default-deny, TLS"]
+    apps["Apps<br/>own users, sandboxed"]
+    sites["Static sites<br/>root-owned files"]
+    pg[("PostgreSQL<br/>CIS, pgAudit")]
+    subgraph rootonly["root only"]
+      cmds["dk-* commands<br/>from root-owned clones"]
+      checks["Nightly checks<br/>security, drift, AIDE"]
+      watch["Site watch<br/>every 10 minutes"]
+    end
+  end
+
+  internet --> fw --> nginx
+  nginx --> apps
+  nginx --> sites
+  apps --> pg
+  laptop -->|SSH| fw
+  github -->|"pull, show, ask, install"| cmds
+  cmds -->|"installs, switches modes"| nginx
+  checks -->|findings| phone
+  watch -->|"down, back"| phone
+
+  classDef app fill:#EEEDFE,stroke:#534AB7,color:#26215C
+  classDef plat fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A
+  classDef ext fill:#FFFFFF,stroke:#888780,color:#2C2C2A
+  class apps,sites,pg app
+  class fw,nginx,cmds,checks,watch plat
+  class internet,laptop,github,phone ext
+```
+
+Everything root runs comes from root-owned places; an app can change itself, never what root runs.
+auditd, fail2ban and the SSH-login notification aren't drawn – they're part of the host.
+
 ## What it does
 
 **Hardening** ([`hardening/install-hardening.sh`](hardening/install-hardening.sh), in parts, each with
@@ -78,6 +120,7 @@ shellcheck and in a sandbox before every deploy.
 
 ## Status
 
-In daily use on one server. What's done and what might come: `ROADMAP.md`.
+In daily use on one server. What's done and what might come: `ROADMAP.md`. Next: adapting it for a
+Kubernetes node, as part of [dk-platform](https://github.com/DimiJonas/dk-platform).
 
 © All rights reserved. The code is public to read; there is no license for reuse.

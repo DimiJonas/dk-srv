@@ -11,6 +11,7 @@
 | –   | Later: own AppArmor profiles for nginx, PostgreSQL, Node.js (A6)                   | M    | –          |
 | –   | Later: logs and notifications also off the server (A9)                             | S–M  | –          |
 | –   | Later: CIS Ubuntu 24.04 v2.0.0, as soon as USG implements it (A11)                 | S    | –          |
+| –   | Next: adapted for a k3s node – [dk-platform](https://github.com/DimiJonas/dk-platform), phase 7 | M | 3 |
 
 ---
 

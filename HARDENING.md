@@ -448,6 +448,35 @@ The app's own business stays in its repository: its backups (the storybook's are
 
 ## Watching: the nightly checks, and the sites every 10 minutes
 
+What the nightly security check does with what it finds (`bin/dk-security-check`, the table at its
+top):
+
+```mermaid
+flowchart LR
+  start["05:10 – dk-security-check"] --> what{"Found"}
+  what -->|"nginx/OpenSSL: a fix exists"| fix["fix installed,<br/>nginx restarted"]
+  what -->|"nginx/OpenSSL: no fix yet"| lock["LOCKDOWN<br/>web server off, backends stopped"]
+  what -->|"an app's npm libraries: critical"| maint["the app's<br/>MAINTENANCE MODE"]
+  what -->|"an app's npm libraries: high"| note["notification"]
+  what -->|"Node.js security release"| node["installed,<br/>the apps restarted"]
+  what -->|OpenSSH| urgent["urgent notification"]
+  what -->|"the rest of Ubuntu: new ones"| note
+  what -->|"a fix not installed for 3 days"| note
+  what -->|"a hardening setting changed"| drift["notification:<br/>Hardening changed"]
+  lock --> mode{"MODE in<br/>dk-srv.conf"}
+  maint --> mode
+  mode -->|trial| would["notification only:<br/>Would switch on …"]
+  mode -->|auto| on["switched on,<br/>notification"]
+
+  classDef act fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A
+  classDef hard fill:#FCEBEB,stroke:#A32D2D,color:#501313
+  class fix,node,note,urgent,drift,would,on act
+  class lock,maint hard
+```
+
+Each problem is reported once, not every night; problems accepted as false alarms (`--accept`, or
+`normal --force`) don't switch anything on again – new ones still do.
+
 - **Security check** (05:10, `dk-security-check`): known vulnerabilities (Ubuntu `pro cves`, npm
   audit for every app's `NPM_DIRS`), updates, and the **drift check** (`hardening_drift` in
   `security-lib.sh`): is every installed part still as it was? It looks at SSH settings, sysctl
